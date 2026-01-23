@@ -1,0 +1,38 @@
+# Green Light Detector Configuration
+camera_name: hikrobot
+exposure_ms: 3.0
+gain: 10.0
+width: 1280
+height: 720
+fps: 30
+vid_pid: MV-CS016-10UC
+
+# Image Processing Configuration
+h_min: 35
+h_max: 85
+s_min: 100
+s_max: 255
+v_min: 100
+v_max: 255
+morph_open_size: 2
+morph_close_size: 5
+min_circularity: 0.7
+min_area: 50
+max_area: 10000
+
+# Distance Calculation
+real_diameter_mm: 50.0
+focal_length_pixels: 1200.0
+
+# Serial Port Configuration
+serial_port: /dev/ttyCH341USB0
+serial_baudrate: 115200
+serial_data_format: X:%.2f,Y:%.2f,D:%.2f
+
+# Display Configuration
+show_preview: true
+draw_bounding_box: true
+draw_center: true
+show_distance: true
+show_mask: true
+window_scale: 0.5

@@ -1,0 +1,4 @@
+# Camera Calibration Configuration
+pattern_cols: 10
+pattern_rows: 7
+center_distance_mm: 40
