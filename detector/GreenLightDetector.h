@@ -5,7 +5,9 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <chrono>
 #include "../serial/serial.hpp"
+#include "../io/camera.hpp"
 
 // 检测到的目标结构体
 struct DetectedTarget {
@@ -62,8 +64,7 @@ class GreenLightDetector {
 private:
     Config config;
     std::unique_ptr<SerialPort> serial_port;
-    cv::VideoCapture cap;
-    bool camera_initialized;
+    std::unique_ptr<io::Camera> camera_;
     std::string config_path;
     
     // 从文件加载配置

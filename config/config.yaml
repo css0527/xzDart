@@ -1,7 +1,7 @@
 # Green Light Detector Configuration
 camera_name: hikrobot
-exposure_ms: 3.0
-gain: 10.0
+exposure_ms: 5.0
+gain: 13.0
 width: 1280
 height: 720
 fps: 30

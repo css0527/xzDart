@@ -7,12 +7,12 @@ int main(int argc, char** argv) {
     GreenLightDetector detector;
     
     // 配置文件路径
-    string config_path = "config/config.yaml";
+    string config_path = "../config/config.yaml";
     if (argc > 1) {
         config_path = argv[1];
         cout << "Using config file: " << config_path << endl;
     } else {
-        cout << "Using default config file: config/config.yaml" << endl;
+        cout << "Using default config file: ../config/config.yaml" << endl;
     }
     
     if (!detector.initialize(config_path)) {

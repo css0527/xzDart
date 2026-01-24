@@ -2,74 +2,72 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
-#include <yaml-cpp/yaml.h>
 #include <chrono>
 #include <thread>
 #include <memory>
 #include <algorithm>
 #include <iomanip>
+#include <stdexcept>
+
+#include "../tools/yaml.hpp"
 
 using namespace std;
 using namespace cv;
 
 // GreenLightDetector 实现
-GreenLightDetector::GreenLightDetector() : camera_initialized(false) {
-    serial_port = std::unique_ptr<SerialPort>(new SerialPort());
+GreenLightDetector::GreenLightDetector() : serial_port(std::unique_ptr<SerialPort>(new SerialPort())) {
 }
 
 GreenLightDetector::~GreenLightDetector() {
-    if (cap.isOpened()) {
-        cap.release();
-    }
 }
 
 bool GreenLightDetector::loadConfig(const std::string& config_path) {
     try {
-        YAML::Node config_yaml = YAML::LoadFile(config_path);
+        auto config_yaml = tools::load(config_path);
         
         // Camera Configuration
-        if (config_yaml["camera_name"]) config.camera_name = config_yaml["camera_name"].as<std::string>();
-        if (config_yaml["exposure_ms"]) config.exposure_ms = config_yaml["exposure_ms"].as<float>();
-        if (config_yaml["gain"]) config.gain = config_yaml["gain"].as<float>();
-        if (config_yaml["width"]) config.width = config_yaml["width"].as<int>();
-        if (config_yaml["height"]) config.height = config_yaml["height"].as<int>();
-        if (config_yaml["fps"]) config.fps = config_yaml["fps"].as<int>();
-        if (config_yaml["vid_pid"]) config.vid_pid = config_yaml["vid_pid"].as<std::string>();
+        if (auto val = tools::read_optional<std::string>(config_yaml, "camera_name")) config.camera_name = *val;
+        if (auto val = tools::read_optional<float>(config_yaml, "exposure_ms")) config.exposure_ms = *val;
+        if (auto val = tools::read_optional<float>(config_yaml, "gain")) config.gain = *val;
+        if (auto val = tools::read_optional<int>(config_yaml, "width")) config.width = *val;
+        if (auto val = tools::read_optional<int>(config_yaml, "height")) config.height = *val;
+        if (auto val = tools::read_optional<int>(config_yaml, "fps")) config.fps = *val;
+        if (auto val = tools::read_optional<std::string>(config_yaml, "vid_pid")) config.vid_pid = *val;
         
         // Image Processing Configuration
-        if (config_yaml["h_min"]) config.h_min = config_yaml["h_min"].as<int>();
-        if (config_yaml["h_max"]) config.h_max = config_yaml["h_max"].as<int>();
-        if (config_yaml["s_min"]) config.s_min = config_yaml["s_min"].as<int>();
-        if (config_yaml["s_max"]) config.s_max = config_yaml["s_max"].as<int>();
-        if (config_yaml["v_min"]) config.v_min = config_yaml["v_min"].as<int>();
-        if (config_yaml["v_max"]) config.v_max = config_yaml["v_max"].as<int>();
-        if (config_yaml["morph_open_size"]) config.morph_open_size = config_yaml["morph_open_size"].as<int>();
-        if (config_yaml["morph_close_size"]) config.morph_close_size = config_yaml["morph_close_size"].as<int>();
-        if (config_yaml["min_circularity"]) config.min_circularity = config_yaml["min_circularity"].as<float>();
-        if (config_yaml["min_area"]) config.min_area = config_yaml["min_area"].as<int>();
-        if (config_yaml["max_area"]) config.max_area = config_yaml["max_area"].as<int>();
+        if (auto val = tools::read_optional<int>(config_yaml, "h_min")) config.h_min = *val;
+        if (auto val = tools::read_optional<int>(config_yaml, "h_max")) config.h_max = *val;
+        if (auto val = tools::read_optional<int>(config_yaml, "s_min")) config.s_min = *val;
+        if (auto val = tools::read_optional<int>(config_yaml, "s_max")) config.s_max = *val;
+        if (auto val = tools::read_optional<int>(config_yaml, "v_min")) config.v_min = *val;
+        if (auto val = tools::read_optional<int>(config_yaml, "v_max")) config.v_max = *val;
+        if (auto val = tools::read_optional<int>(config_yaml, "morph_open_size")) config.morph_open_size = *val;
+        if (auto val = tools::read_optional<int>(config_yaml, "morph_close_size")) config.morph_close_size = *val;
+        if (auto val = tools::read_optional<float>(config_yaml, "min_circularity")) config.min_circularity = *val;
+        if (auto val = tools::read_optional<int>(config_yaml, "min_area")) config.min_area = *val;
+        if (auto val = tools::read_optional<int>(config_yaml, "max_area")) config.max_area = *val;
         
         // Distance Calculation
-        if (config_yaml["real_diameter_mm"]) config.real_diameter_mm = config_yaml["real_diameter_mm"].as<float>();
-        if (config_yaml["focal_length_pixels"]) config.focal_length_pixels = config_yaml["focal_length_pixels"].as<float>();
+        if (auto val = tools::read_optional<float>(config_yaml, "real_diameter_mm")) config.real_diameter_mm = *val;
+        if (auto val = tools::read_optional<float>(config_yaml, "focal_length_pixels")) config.focal_length_pixels = *val;
         
         // Serial Port Configuration
-        if (config_yaml["serial_port"]) config.serial_port = config_yaml["serial_port"].as<std::string>();
-        if (config_yaml["serial_baudrate"]) config.serial_baudrate = config_yaml["serial_baudrate"].as<int>();
-        if (config_yaml["serial_data_format"]) config.serial_data_format = config_yaml["serial_data_format"].as<std::string>();
+        if (auto val = tools::read_optional<std::string>(config_yaml, "serial_port")) config.serial_port = *val;
+        if (auto val = tools::read_optional<int>(config_yaml, "serial_baudrate")) config.serial_baudrate = *val;
+        if (auto val = tools::read_optional<std::string>(config_yaml, "serial_data_format")) config.serial_data_format = *val;
         
         // Display Configuration
-        if (config_yaml["show_preview"]) config.show_preview = config_yaml["show_preview"].as<bool>();
-        if (config_yaml["draw_bounding_box"]) config.draw_bounding_box = config_yaml["draw_bounding_box"].as<bool>();
-        if (config_yaml["draw_center"]) config.draw_center = config_yaml["draw_center"].as<bool>();
-        if (config_yaml["show_distance"]) config.show_distance = config_yaml["show_distance"].as<bool>();
-        if (config_yaml["show_mask"]) config.show_mask = config_yaml["show_mask"].as<bool>();
-        if (config_yaml["window_scale"]) config.window_scale = config_yaml["window_scale"].as<float>();
+        if (auto val = tools::read_optional<bool>(config_yaml, "show_preview")) config.show_preview = *val;
+        if (auto val = tools::read_optional<bool>(config_yaml, "draw_bounding_box")) config.draw_bounding_box = *val;
+        if (auto val = tools::read_optional<bool>(config_yaml, "draw_center")) config.draw_center = *val;
+        if (auto val = tools::read_optional<bool>(config_yaml, "show_distance")) config.show_distance = *val;
+        if (auto val = tools::read_optional<bool>(config_yaml, "show_mask")) config.show_mask = *val;
+        if (auto val = tools::read_optional<float>(config_yaml, "window_scale")) config.window_scale = *val;
         
         cout << "Configuration loaded from " << config_path << endl;
         return true;
     }
-    catch (const YAML::Exception& e) {
+    catch (const std::exception& e) {
         cerr << "Error loading config file: " << e.what() << endl;
         return false;
     }
@@ -77,6 +75,11 @@ bool GreenLightDetector::loadConfig(const std::string& config_path) {
 
 bool GreenLightDetector::initialize(const std::string& config_path) {
     this->config_path = config_path;
+    
+    // 加载配置
+    if (!loadConfig(config_path)) {
+        return false;
+    }
     
     // 初始化串口
     if (!serial_port->open(config.serial_port, config.serial_baudrate)) {
@@ -91,43 +94,15 @@ bool GreenLightDetector::initialize(const std::string& config_path) {
 
 bool GreenLightDetector::initCamera() {
     cout << "Initializing camera..." << endl;
-    
-    // 首先尝试通过V4L2打开
-    cout << "Trying V4L2 device /dev/video1..." << endl;
-    cap.open("/dev/video1", CAP_V4L2);
-    
-    // 如果失败，尝试其他设备
-    if (!cap.isOpened()) {
-        for (int i = 0; i < 10; i++) {
-            cout << "Trying camera index " << i << "..." << endl;
-            cap.open(i);
-            if (cap.isOpened()) break;
-        }
-    }
-    
-    // 如果还是失败，尝试视频文件（用于测试）
-    if (!cap.isOpened()) {
-        cout << "Trying test video file..." << endl;
-        cap.open("test_video.mp4");
-        if (cap.isOpened()) {
-            cout << "Test video loaded. Running in test mode." << endl;
-            camera_initialized = true;
-            return true;
-        }
-    }
-    
-    if (!cap.isOpened()) {
-        cerr << "ERROR: Failed to open camera or video source" << endl;
-        cerr << "Please check:" << endl;
-        cerr << "1. Camera is connected and powered on" << endl;
-        cerr << "2. Permissions: ls -l /dev/video*" << endl;
-        cerr << "3. Try: sudo usermod -a -G video $USER (then logout/login)" << endl;
-        cerr << "4. Create test video: ffmpeg -f lavfi -i testsrc=size=1280x720:rate=30:duration=60 test_video.mp4" << endl;
+
+    try {
+        camera_ = std::make_unique<io::Camera>(config_path);
+        cout << "Camera initialized successfully" << endl;
+        return true;
+    } catch (const std::exception& e) {
+        cerr << "Failed to initialize camera: " << e.what() << endl;
         return false;
     }
-    
-    camera_initialized = true;
-    return true;
 }
 
 DetectedTarget GreenLightDetector::processFrame(cv::Mat& frame) {
@@ -244,7 +219,7 @@ void GreenLightDetector::sendDataToSerial(const DetectedTarget& target) {
     
     if (bytes_written > 0) {
         // 在终端显示发送的数据
-        cout << "Serial: " << data;
+        cout << "Serial: " << data<<endl;
     }
 }
 
@@ -320,12 +295,6 @@ void GreenLightDetector::drawResults(cv::Mat& frame, const DetectedTarget& targe
 }
 
 void GreenLightDetector::run() {
-    // 加载配置
-    if (!loadConfig(config_path)) {
-        cerr << "Error: Failed to load configuration from " << config_path << endl;
-        return;
-    }
-    
     // 初始化相机
     if (!initCamera()) {
         return;
@@ -336,7 +305,10 @@ void GreenLightDetector::run() {
     cout << "Starting detection loop. Press 'q' to quit." << endl;
     
     while (true) {
-        if (!cap.read(frame) || frame.empty()) {
+        std::chrono::steady_clock::time_point timestamp;
+        camera_->read(frame, timestamp);
+        
+        if (frame.empty()) {
             cerr << "Failed to read frame" << endl;
             this_thread::sleep_for(chrono::milliseconds(100));
             continue;

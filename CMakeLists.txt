@@ -12,16 +12,32 @@ find_package(OpenCV REQUIRED)
 # 查找yaml-cpp
 find_package(yaml-cpp REQUIRED)
 
+# 查找spdlog
+find_package(spdlog REQUIRED)
+
+# 查找fmt
+find_package(fmt REQUIRED)
+
 # 包含目录
 include_directories(${OpenCV_INCLUDE_DIRS})
 include_directories(detector)
 include_directories(serial)
+include_directories(tools)
+include_directories(io)
+include_directories(io/hikrobot/include)
+
+# 库目录
+link_directories(io/hikrobot/lib/amd64)
 
 # 添加可执行文件
 add_executable(main
     main.cpp
     detector/GreenLightDetector.cpp
     serial/serial.cpp
+    serial/crc.cpp
+    io/camera.cpp
+    io/hikrobot/hikrobot.cpp
+    tools/logger.cpp
 )
 
 add_executable(camera_calibration
@@ -32,6 +48,10 @@ add_executable(camera_calibration
 target_link_libraries(main
     ${OpenCV_LIBS}
     yaml-cpp
+    spdlog
+    fmt
+    usb-1.0
+    MvCameraControl
 )
 
 target_link_libraries(camera_calibration
