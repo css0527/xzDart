@@ -6,7 +6,14 @@
 #include <vector>
 #include <memory>
 #include <chrono>
+
+// 前向声明，避免循环依赖
+class SerialPort;
+struct ReceivedFrame;  // 前向声明
+class ProtocolHandler; // 前向声明
+
 #include "../serial/serial.hpp"
+#include "../serial/protocol_handler.hpp"  // 包含协议处理器头文件
 #include "../io/camera.hpp"
 
 // 检测到的目标结构体
@@ -18,6 +25,10 @@ struct DetectedTarget {
     float circularity;
     float area;
     bool valid;
+    
+    // 默认构造函数
+    DetectedTarget() : center(0, 0), boundingRect(), radius(0), distance(0), 
+                      circularity(0), area(0), valid(false) {}
 };
 
 // 配置结构体
@@ -64,8 +75,12 @@ class GreenLightDetector {
 private:
     Config config;
     std::unique_ptr<SerialPort> serial_port;
+    std::unique_ptr<ProtocolHandler> protocol_handler;
     std::unique_ptr<io::Camera> camera_;
     std::string config_path;
+    
+    // 当前检测目标
+    DetectedTarget target;
     
     // 从文件加载配置
     bool loadConfig(const std::string& config_path);
@@ -84,6 +99,11 @@ private:
     
     // 在图像上绘制结果
     void drawResults(cv::Mat& frame, const DetectedTarget& target);
+    
+    // 新增：串口数据处理
+    void processSerialData();
+    void onFrameReceived(const ReceivedFrame& frame);
+    void generateResponse(const ReceivedFrame& frame);
     
 public:
     GreenLightDetector();

@@ -18,6 +18,9 @@ find_package(spdlog REQUIRED)
 # 查找fmt
 find_package(fmt REQUIRED)
 
+# 查找线程库
+find_package(Threads REQUIRED)
+
 # 包含目录
 include_directories(${OpenCV_INCLUDE_DIRS})
 include_directories(detector)
@@ -29,12 +32,18 @@ include_directories(io/hikrobot/include)
 # 库目录
 link_directories(io/hikrobot/lib/amd64)
 
+# 添加协议处理器源文件
+set(PROTOCOL_SOURCES
+    serial/protocol_handler.cpp
+)
+
 # 添加可执行文件
 add_executable(main
     main.cpp
     detector/GreenLightDetector.cpp
     serial/serial.cpp
     serial/crc.cpp
+    serial/protocol_handler.cpp  # 新增
     io/camera.cpp
     io/hikrobot/hikrobot.cpp
     tools/logger.cpp
@@ -52,6 +61,7 @@ target_link_libraries(main
     fmt
     usb-1.0
     MvCameraControl
+    Threads::Threads  # 新增，用于多线程支持
 )
 
 target_link_libraries(camera_calibration

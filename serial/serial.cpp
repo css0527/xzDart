@@ -4,6 +4,9 @@
 #include <termios.h>
 #include <unistd.h>
 #include <string.h>
+#include <poll.h>
+#include <errno.h>
+#include <sys/ioctl.h>
 
 using namespace std;
 
@@ -87,4 +90,51 @@ int SerialPort::write(const std::string& data) {
 int SerialPort::write(const uint8_t* data, size_t length) {
     if (!isOpen()) return -1;
     return ::write(serial_fd, data, length);
+}
+
+// 新增：读取数据
+int SerialPort::read(uint8_t* buffer, size_t length, int timeout_ms) {
+    if (!isOpen()) return -1;
+    
+    struct pollfd pfd;
+    pfd.fd = serial_fd;
+    pfd.events = POLLIN;
+    
+    int ret = poll(&pfd, 1, timeout_ms);
+    if (ret <= 0) return 0; // 超时或错误
+    
+    if (pfd.revents & POLLIN) {
+        ssize_t bytes = ::read(serial_fd, buffer, length);
+        if (bytes < 0) {
+            if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                std::cerr << "Serial read error: " << strerror(errno) << std::endl;
+            }
+            return -1;
+        }
+        return bytes;
+    }
+    return 0;
+}
+
+int SerialPort::read(std::vector<uint8_t>& buffer, int timeout_ms) {
+    buffer.resize(1024); // 预分配空间
+    int bytes = read(buffer.data(), buffer.size(), timeout_ms);
+    if (bytes > 0) {
+        buffer.resize(bytes);
+    } else {
+        buffer.clear();
+    }
+    return bytes;
+}
+
+std::vector<uint8_t> SerialPort::readAll(int timeout_ms) {
+    std::vector<uint8_t> buffer;
+    read(buffer, timeout_ms);
+    return buffer;
+}
+
+void SerialPort::flush() {
+    if (isOpen()) {
+        tcflush(serial_fd, TCIOFLUSH);
+    }
 }

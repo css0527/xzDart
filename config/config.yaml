@@ -1,6 +1,6 @@
 # Green Light Detector Configuration
 camera_name: hikrobot
-exposure_ms: 5.0
+exposure_ms: 10.0
 gain: 13.0
 width: 1280
 height: 720
@@ -28,6 +28,14 @@ focal_length_pixels: 1200.0
 serial_port: /dev/ttyCH341USB0
 serial_baudrate: 115200
 serial_data_format: X:%.2f,Y:%.2f,D:%.2f
+
+# 协议配置
+serial_protocol:
+  rx_header: "AA55"      # 接收帧头，十六进制字符串
+  rx_footer: "55AA"      # 接收帧尾
+  tx_header: "BB66"      # 发送帧头
+  tx_footer: "66BB"      # 发送帧尾
+  use_crc: true          # 是否使用CRC校验
 
 # Display Configuration
 show_preview: true

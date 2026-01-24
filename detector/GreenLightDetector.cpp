@@ -9,13 +9,17 @@
 #include <iomanip>
 #include <stdexcept>
 
+// 确保先包含协议处理器头文件
+#include "../serial/protocol_handler.hpp"
 #include "../tools/yaml.hpp"
 
 using namespace std;
 using namespace cv;
 
 // GreenLightDetector 实现
-GreenLightDetector::GreenLightDetector() : serial_port(std::unique_ptr<SerialPort>(new SerialPort())) {
+GreenLightDetector::GreenLightDetector() 
+    : serial_port(std::unique_ptr<SerialPort>(new SerialPort()))
+    , protocol_handler(std::unique_ptr<ProtocolHandler>(new ProtocolHandler())) {
 }
 
 GreenLightDetector::~GreenLightDetector() {
@@ -87,11 +91,140 @@ bool GreenLightDetector::initialize(const std::string& config_path) {
         cerr << "To fix: sudo chmod 666 " << config.serial_port << endl;
     } else {
         cout << "Serial port initialized successfully" << endl;
+
+         // 配置协议处理器
+        // 设置接收帧头帧尾（根据实际协议）
+        std::vector<uint8_t> rx_header = {0xAA, 0x55};  // 接收帧头
+        std::vector<uint8_t> rx_footer = {0x55, 0xAA};  // 接收帧尾
+        protocol_handler->setReceiveHeader(rx_header);
+        protocol_handler->setReceiveFooter(rx_footer);
+        
+        // 设置发送帧头帧尾
+        std::vector<uint8_t> tx_header = {0xBB, 0x66};  // 发送帧头
+        std::vector<uint8_t> tx_footer = {0x66, 0xBB};  // 发送帧尾
+        protocol_handler->setTransmitHeader(tx_header);
+        protocol_handler->setTransmitFooter(tx_footer);
+        
+        // 设置CRC校验
+        protocol_handler->setUseCRC(true);
+        
+        // 设置回调函数
+        protocol_handler->setFrameReceivedCallback(
+            [this](const ReceivedFrame& frame) {
+                this->onFrameReceived(frame);
+            }
+        );
+        
+        // 启动异步处理
+        protocol_handler->startAsyncProcessing();
     }
     
     return true;
 }
+// 新增：串口数据处理线程
+void GreenLightDetector::processSerialData() {
+    const int BUFFER_SIZE = 1024;
+    uint8_t buffer[BUFFER_SIZE];
+    
+    while (serial_port->isOpen()) {
+        int bytes_read = serial_port->read(buffer, BUFFER_SIZE, 10); // 10ms超时
+        
+        if (bytes_read > 0) {
+            // 将数据喂给协议处理器
+            protocol_handler->feedData(buffer, bytes_read);
+            
+            // 也可以直接处理原始数据
+            // cout << "Received raw data: ";
+            // for (int i = 0; i < bytes_read; ++i) {
+            //     printf("%02X ", buffer[i]);
+            // }
+            // cout << endl;
+        }
+        
+        // 短暂休眠，避免CPU占用过高
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
 
+// 新增：接收到完整帧的回调
+void GreenLightDetector::onFrameReceived(const ReceivedFrame& frame) {
+    cout << "Received frame: " << endl;
+    cout << "  Header: ";
+    for (auto b : frame.header) printf("%02X ", b);
+    cout << endl;
+    
+    cout << "  Data: ";
+    for (auto b : frame.data) {
+        if (b >= 32 && b <= 126) {
+            cout << static_cast<char>(b);
+        } else {
+            printf("[%02X]", b);
+        }
+    }
+    cout << endl;
+    
+    cout << "  Footer: ";
+    for (auto b : frame.footer) printf("%02X ", b);
+    cout << endl;
+    
+    cout << "  CRC: " << (frame.crc_valid ? "Valid" : "Invalid") << endl;
+    
+    // 生成响应数据
+    generateResponse(frame);
+}
+
+// 新增：根据接收数据生成响应
+void GreenLightDetector::generateResponse(const ReceivedFrame& frame) {
+    if (!serial_port->isOpen()) return;
+    
+    // 示例：解析接收到的命令
+    if (!frame.data.empty()) {
+        // 假设第一个字节是命令码
+        uint8_t command = frame.data[0];
+        
+        std::vector<uint8_t> response_data;
+        
+        switch (command) {
+            case 0x01:  // 获取状态
+                response_data = {0x01, 0x00};  // 状态正常
+                break;
+                
+            case 0x02:  // 获取检测结果
+                // 这里可以填充实际的检测数据
+                {
+                    float x = target.center.x;
+                    float y = target.center.y;
+                    float d = target.distance;
+                    
+                    uint8_t* x_bytes = reinterpret_cast<uint8_t*>(&x);
+                    uint8_t* y_bytes = reinterpret_cast<uint8_t*>(&y);
+                    uint8_t* d_bytes = reinterpret_cast<uint8_t*>(&d);
+                    
+                    response_data = {0x02};  // 命令码
+                    for (int i = 0; i < 4; ++i) response_data.push_back(x_bytes[i]);
+                    for (int i = 0; i < 4; ++i) response_data.push_back(y_bytes[i]);
+                    for (int i = 0; i < 4; ++i) response_data.push_back(d_bytes[i]);
+                }
+                break;
+                
+            case 0x03:  // 设置参数
+                // 解析设置参数并更新配置
+                // ... 参数解析代码
+                response_data = {0x03, 0x01};  // 设置成功
+                break;
+                
+            default:
+                response_data = {0xFF, 0x00};  // 未知命令
+                break;
+        }
+        
+        // 打包数据并发送
+        auto packet = protocol_handler->packData(response_data, true);
+        serial_port->write(packet.data(), packet.size());
+        
+        cout << "Sent response packet" << endl;
+    }
+}
 bool GreenLightDetector::initCamera() {
     cout << "Initializing camera..." << endl;
 
@@ -210,16 +343,39 @@ void GreenLightDetector::sendDataToSerial(const DetectedTarget& target) {
         return;
     }
     
-    char buffer[256];
-    snprintf(buffer, sizeof(buffer), config.serial_data_format.c_str(),
-             target.center.x, target.center.y, target.distance);
     
-    string data(buffer);
-    int bytes_written = serial_port->write(data);
+    // 准备数据
+    std::vector<uint8_t> data;
+    
+    // 数据格式：数据类型(1字节) + X坐标(4字节) + Y坐标(4字节) + 距离(4字节)
+    data.push_back(0xA0);  // 数据类型：检测结果
+    
+    // 添加X坐标（float转4字节）
+    float x = target.center.x;
+    uint8_t* x_bytes = reinterpret_cast<uint8_t*>(&x);
+    for (int i = 0; i < 4; ++i) data.push_back(x_bytes[i]);
+    
+    // 添加Y坐标
+    float y = target.center.y;
+    uint8_t* y_bytes = reinterpret_cast<uint8_t*>(&y);
+    for (int i = 0; i < 4; ++i) data.push_back(y_bytes[i]);
+    
+    // 添加距离
+    float d = target.distance;
+    uint8_t* d_bytes = reinterpret_cast<uint8_t*>(&d);
+    for (int i = 0; i < 4; ++i) data.push_back(d_bytes[i]);
+    
+    // 使用协议处理器打包数据（包含帧头帧尾和CRC）
+    auto packet = protocol_handler->packData(data, true);
+    
+    // 发送数据
+    int bytes_written = serial_port->write(packet.data(), packet.size());
     
     if (bytes_written > 0) {
-        // 在终端显示发送的数据
-        cout << "Serial: " << data<<endl;
+        // 显示调试信息
+        cout << "Sent detection data: ";
+        cout << "X=" << x << ", Y=" << y << ", D=" << d;
+        cout << " (" << bytes_written << " bytes)" << endl;
     }
 }
 
@@ -300,6 +456,14 @@ void GreenLightDetector::run() {
         return;
     }
     
+    // 启动串口数据读取线程（如果串口已打开）
+    std::thread serial_thread;
+    if (serial_port->isOpen()) {
+        serial_thread = std::thread([this]() {
+            this->processSerialData();
+        });
+    }
+
     Mat frame;
     
     cout << "Starting detection loop. Press 'q' to quit." << endl;
