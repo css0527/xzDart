@@ -21,21 +21,20 @@ find_package(fmt REQUIRED)
 # 查找线程库
 find_package(Threads REQUIRED)
 
-# 包含目录
+# 包含目录 - 确保 tools 目录被包含
+include_directories(${CMAKE_SOURCE_DIR})
 include_directories(${OpenCV_INCLUDE_DIRS})
-include_directories(detector)
-include_directories(serial)
-include_directories(tools)
-include_directories(io)
-include_directories(io/hikrobot/include)
+include_directories(${CMAKE_SOURCE_DIR}/detector)
+include_directories(${CMAKE_SOURCE_DIR}/serial)
+include_directories(${CMAKE_SOURCE_DIR}/tools)  # 确保这行存在
+include_directories(${CMAKE_SOURCE_DIR}/io)
+include_directories(${CMAKE_SOURCE_DIR}/io/hikrobot/include)
+
+# 或者使用 target_include_directories (更推荐的方式)
+# ...
 
 # 库目录
 link_directories(io/hikrobot/lib/amd64)
-
-# 添加协议处理器源文件
-set(PROTOCOL_SOURCES
-    serial/protocol_handler.cpp
-)
 
 # 添加可执行文件
 add_executable(main
@@ -43,14 +42,32 @@ add_executable(main
     detector/GreenLightDetector.cpp
     serial/serial.cpp
     serial/crc.cpp
-    serial/protocol_handler.cpp  # 新增
+    serial/protocol_handler.cpp
     io/camera.cpp
     io/hikrobot/hikrobot.cpp
     tools/logger.cpp
+    tools/img_tools.cpp
 )
 
 add_executable(camera_calibration
     calibration/camera_calibration.cpp
+    tools/img_tools.cpp
+)
+
+# 使用target_include_directories替代include_directories
+target_include_directories(main PRIVATE
+    ${OpenCV_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/detector
+    ${CMAKE_SOURCE_DIR}/serial
+    ${CMAKE_SOURCE_DIR}/tools
+    ${CMAKE_SOURCE_DIR}/io
+    ${CMAKE_SOURCE_DIR}/io/hikrobot/include
+)
+
+target_include_directories(camera_calibration PRIVATE
+    ${OpenCV_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/tools
+    ${CMAKE_SOURCE_DIR}/calibration
 )
 
 # 链接库
@@ -61,13 +78,15 @@ target_link_libraries(main
     fmt
     usb-1.0
     MvCameraControl
-    Threads::Threads  # 新增，用于多线程支持
+    Threads::Threads
 )
 
 target_link_libraries(camera_calibration
     ${OpenCV_LIBS}
     yaml-cpp
+    fmt
 )
 
 # 设置编译选项
 target_compile_options(main PRIVATE -Wall -Wextra -g -O2)
+target_compile_options(camera_calibration PRIVATE -Wall -Wextra -g -O2)

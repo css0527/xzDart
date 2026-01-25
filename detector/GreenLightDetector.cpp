@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <iomanip>
 #include <stdexcept>
+#include <cmath>
 
 // 确保先包含协议处理器头文件
 #include "../serial/protocol_handler.hpp"
@@ -16,6 +17,10 @@
 using namespace std;
 using namespace cv;
 
+// 常数定义
+const float DEG_TO_RAD = CV_PI / 180.0f;
+const float RAD_TO_DEG = 180.0f / CV_PI;
+
 // GreenLightDetector 实现
 GreenLightDetector::GreenLightDetector() 
     : serial_port(std::unique_ptr<SerialPort>(new SerialPort()))
@@ -23,6 +28,99 @@ GreenLightDetector::GreenLightDetector()
 }
 
 GreenLightDetector::~GreenLightDetector() {
+}
+
+bool GreenLightDetector::loadCameraParameters() {
+    try {
+        auto config_yaml = tools::load(config_path);
+        
+        // 读取相机内参矩阵 [3x3]
+        if (auto camera_matrix_node = tools::read_optional<std::vector<double>>(config_yaml, "camera_matrix")) {
+            std::vector<double> matrix_data = *camera_matrix_node;
+            if (matrix_data.size() == 9) {
+                config.camera_matrix = (Mat_<double>(3, 3) << 
+                    matrix_data[0], matrix_data[1], matrix_data[2],
+                    matrix_data[3], matrix_data[4], matrix_data[5],
+                    matrix_data[6], matrix_data[7], matrix_data[8]);
+                
+                cout << "Camera matrix loaded:" << endl;
+                cout << config.camera_matrix << endl;
+            } else {
+                cerr << "Camera matrix should have 9 elements" << endl;
+                return false;
+            }
+        } else {
+            cerr << "Camera matrix not found in config" << endl;
+            return false;
+        }
+        
+        // 读取畸变系数 [5x1]
+        if (auto dist_coeffs_node = tools::read_optional<std::vector<double>>(config_yaml, "distort_coeffs")) {
+            std::vector<double> dist_data = *dist_coeffs_node;
+            if (dist_data.size() >= 5) {
+                config.dist_coeffs = Mat::zeros(5, 1, CV_64F);
+                for (size_t i = 0; i < 5; ++i) {
+                    config.dist_coeffs.at<double>(i) = dist_data[i];
+                }
+                
+                cout << "Distortion coefficients loaded:" << endl;
+                cout << config.dist_coeffs << endl;
+            } else {
+                cerr << "Distortion coefficients should have at least 5 elements" << endl;
+                return false;
+            }
+        } else {
+            cerr << "Distortion coefficients not found in config" << endl;
+            return false;
+        }
+        
+        // 读取相机-云台旋转矩阵 R_camera2gimbal [3x3]
+        if (auto R_node = tools::read_optional<std::vector<double>>(config_yaml, "R_camera2gimbal")) {
+            std::vector<double> R_data = *R_node;
+            if (R_data.size() == 9) {
+                config.R_camera2gimbal = (Mat_<double>(3, 3) << 
+                    R_data[0], R_data[1], R_data[2],
+                    R_data[3], R_data[4], R_data[5],
+                    R_data[6], R_data[7], R_data[8]);
+                
+                cout << "Camera to gimbal rotation matrix loaded:" << endl;
+                cout << config.R_camera2gimbal << endl;
+            } else {
+                cerr << "R_camera2gimbal should have 9 elements" << endl;
+                return false;
+            }
+        } else {
+            cerr << "R_camera2gimbal not found in config" << endl;
+            return false;
+        }
+        
+        // 读取相机-云台平移向量 t_camera2gimbal [3]
+        if (auto t_node = tools::read_optional<std::vector<double>>(config_yaml, "t_camera2gimbal")) {
+            std::vector<double> t_data = *t_node;
+            if (t_data.size() == 3) {
+                config.t_camera2gimbal = (Mat_<double>(3, 1) << 
+                    t_data[0], t_data[1], t_data[2]);
+                
+                cout << "Camera to gimbal translation vector loaded:" << endl;
+                cout << config.t_camera2gimbal << endl;
+            } else {
+                cerr << "t_camera2gimbal should have 3 elements" << endl;
+                return false;
+            }
+        } else {
+            cerr << "t_camera2gimbal not found in config" << endl;
+            return false;
+        }
+        
+        // 设置目标半径（根据配置文件中的直径）
+        config.target_radius_3d = config.real_diameter_mm / 2000.0f; // 转换为米
+        
+        return true;
+    }
+    catch (const std::exception& e) {
+        cerr << "Error loading camera parameters from YAML: " << e.what() << endl;
+        return false;
+    }
 }
 
 bool GreenLightDetector::loadConfig(const std::string& config_path) {
@@ -68,6 +166,9 @@ bool GreenLightDetector::loadConfig(const std::string& config_path) {
         if (auto val = tools::read_optional<bool>(config_yaml, "show_mask")) config.show_mask = *val;
         if (auto val = tools::read_optional<float>(config_yaml, "window_scale")) config.window_scale = *val;
         
+        // 默认显示PNP结果
+        config.show_pnp_results = true;
+        
         cout << "Configuration loaded from " << config_path << endl;
         return true;
     }
@@ -82,6 +183,12 @@ bool GreenLightDetector::initialize(const std::string& config_path) {
     
     // 加载配置
     if (!loadConfig(config_path)) {
+        return false;
+    }
+    
+    // 加载相机参数（内参和相机-云台转换）
+    if (!loadCameraParameters()) {
+        cerr << "Failed to load camera parameters" << endl;
         return false;
     }
     
@@ -120,6 +227,163 @@ bool GreenLightDetector::initialize(const std::string& config_path) {
     }
     
     return true;
+}
+
+float GreenLightDetector::calculateSimpleDistance(float radius_pixels) {
+    // 使用相似三角形原理计算距离
+    // distance = (真实直径 * 焦距) / (像素直径)
+    if (radius_pixels <= 0) return 0;
+    
+    float diameter_pixels = radius_pixels * 2;
+    float distance_mm = (config.real_diameter_mm * config.focal_length_pixels) / diameter_pixels;
+    float distance_m = distance_mm / 1000.0f;
+    
+    return distance_m;
+}
+
+void GreenLightDetector::calculatePoseWithPNP(DetectedTarget& target) {
+    if (!target.valid) return;
+    
+    // 更准确的PNP建模
+    // 使用目标圆的边缘点建立3D-2D对应关系
+    
+    // 目标实际半径（从配置读取）
+    float real_radius_m = config.real_diameter_mm / 2000.0f;  // 毫米转米
+    
+    // 创建更密集的点集以获得更好的精度
+    vector<Point3f> object_points;
+    int num_points = 16;  // 使用16个点，增加精度
+    
+    for (int i = 0; i < num_points; i++) {
+        float angle = 2 * CV_PI * i / num_points;
+        float x = real_radius_m * cos(angle);
+        float y = real_radius_m * sin(angle);
+        float z = 0;
+        object_points.push_back(Point3f(x, y, z));
+    }
+    
+    // 添加圆心作为额外点（Z=0平面）
+    object_points.push_back(Point3f(0, 0, 0));
+    
+    // 图像点
+    vector<Point2f> image_points;
+    float radius_px = target.radius;
+    
+    for (int i = 0; i < num_points; i++) {
+        float angle = 2 * CV_PI * i / num_points;
+        float x = target.center.x + radius_px * cos(angle);
+        float y = target.center.y + radius_px * sin(angle);
+        image_points.push_back(Point2f(x, y));
+    }
+    
+    // 添加圆心对应的图像点
+    image_points.push_back(Point2f(target.center.x, target.center.y));
+    
+    // 使用SolvePnP计算相机姿态
+    Mat rvec, tvec;
+    Mat camera_matrix = config.camera_matrix;
+    Mat dist_coeffs = config.dist_coeffs;
+    
+    try {
+        // 添加调试输出
+        cout << "=== PNP计算调试信息 ===" << endl;
+        cout << "目标半径(像素): " << radius_px << endl;
+        cout << "目标实际半径(米): " << real_radius_m << endl;
+        cout << "图像点数: " << image_points.size() << endl;
+        
+        bool success = solvePnP(object_points, image_points, 
+                               camera_matrix, dist_coeffs, 
+                               rvec, tvec, false, SOLVEPNP_ITERATIVE);
+        
+        if (success) {
+            target.distance_pnp = static_cast<float>(tvec.at<double>(2, 0));
+            
+            target.world_position = Point3f(
+                static_cast<float>(tvec.at<double>(0, 0)),
+                static_cast<float>(tvec.at<double>(1, 0)),
+                static_cast<float>(tvec.at<double>(2, 0))
+            );
+            
+            // 计算重投影误差
+            vector<Point2f> projected_points;
+            projectPoints(object_points, rvec, tvec, camera_matrix, dist_coeffs, projected_points);
+            
+            double total_error = 0;
+            for (size_t i = 0; i < image_points.size(); i++) {
+                double error = norm(image_points[i] - projected_points[i]);
+                total_error += error * error;
+            }
+            double mean_error = sqrt(total_error / image_points.size());
+            
+            cout << "PNP计算成功!" << endl;
+            cout << "距离: " << target.distance_pnp << " 米" << endl;
+            cout << "3D位置: (" << target.world_position.x << ", " 
+                 << target.world_position.y << ", " << target.world_position.z << ")" << endl;
+            cout << "==========================" << endl;
+            
+            // 计算姿态角
+            calculateAngles(target);
+        } else {
+            cerr << "PNP计算失败" << endl;
+        }
+    }
+    catch (const exception& e) {
+        cerr << "PNP calculation error: " << e.what() << endl;
+    }
+}
+
+void GreenLightDetector::calculateAngles(DetectedTarget& target) {
+    if (!target.valid) return;
+    
+    // 计算在相机坐标系中的角度
+    float x = target.world_position.x;
+    float y = target.world_position.y;
+     float z = target.world_position.z;
+    
+    // 计算距离
+    float distance = sqrt(x*x + y*y + z*z);
+    
+    if (distance > 0) {
+        // 俯仰角：绕X轴旋转，Y-Z平面
+        target.pitch_deg = asin(y / distance) * RAD_TO_DEG;
+        
+        // 方位角：绕Y轴旋转，X-Z平面  
+        target.yaw_deg = atan2(x, z) * RAD_TO_DEG;
+    }
+    
+    // 转换到云台坐标系
+    if (!config.R_camera2gimbal.empty() && !config.t_camera2gimbal.empty()) {
+        // 将目标点在相机坐标系中的坐标转换为齐次坐标
+        Mat point_camera = (Mat_<double>(4, 1) << 
+            target.world_position.x, 
+            target.world_position.y, 
+            target.world_position.z, 
+            1.0);
+        
+        // 构建相机到云台的变换矩阵
+        Mat R = config.R_camera2gimbal;
+        Mat t = config.t_camera2gimbal;
+        
+        Mat T_camera2gimbal = Mat::eye(4, 4, CV_64F);
+        R.copyTo(T_camera2gimbal(Rect(0, 0, 3, 3)));
+        t.copyTo(T_camera2gimbal(Rect(3, 0, 1, 3)));
+        
+        // 变换到云台坐标系
+        Mat point_gimbal = T_camera2gimbal * point_camera;
+        
+        float x_g = static_cast<float>(point_gimbal.at<double>(0, 0));
+        float y_g = static_cast<float>(point_gimbal.at<double>(1, 0));
+        float z_g = static_cast<float>(point_gimbal.at<double>(2, 0));
+        
+        // 计算云台坐标系中的距离
+        float distance_g = sqrt(x_g*x_g + y_g*y_g + z_g*z_g);
+        
+        if (distance_g > 0) {
+            // 计算云台坐标系中的角度
+            target.pitch_gimbal_deg = asin(y_g / distance_g) * RAD_TO_DEG;
+            target.yaw_gimbal_deg = atan2(x_g, z_g) * RAD_TO_DEG;
+        }
+    }
 }
 // 新增：串口数据处理线程
 void GreenLightDetector::processSerialData() {
@@ -173,7 +437,6 @@ void GreenLightDetector::onFrameReceived(const ReceivedFrame& frame) {
     generateResponse(frame);
 }
 
-// 新增：根据接收数据生成响应
 void GreenLightDetector::generateResponse(const ReceivedFrame& frame) {
     if (!serial_port->isOpen()) return;
     
@@ -194,7 +457,8 @@ void GreenLightDetector::generateResponse(const ReceivedFrame& frame) {
                 {
                     float x = target.center.x;
                     float y = target.center.y;
-                    float d = target.distance;
+                    // 修复：使用正确的成员名
+                    float d = target.distance_pnp > 0 ? target.distance_pnp : target.distance_simple;
                     
                     uint8_t* x_bytes = reinterpret_cast<uint8_t*>(&x);
                     uint8_t* y_bytes = reinterpret_cast<uint8_t*>(&y);
@@ -238,6 +502,7 @@ bool GreenLightDetector::initCamera() {
     }
 }
 
+// 更新processFrame函数，添加PNP计算
 DetectedTarget GreenLightDetector::processFrame(cv::Mat& frame) {
     DetectedTarget result;
     result.valid = false;
@@ -312,43 +577,48 @@ DetectedTarget GreenLightDetector::processFrame(cv::Mat& frame) {
     // 计算边界框
     Rect bbox = boundingRect(best_contour);
     
-    // 计算距离
-    float distance = calculateDistance(radius);
+    // 计算简单距离
+    float distance_simple = calculateSimpleDistance(radius);
     
     result.center = center;
     result.boundingRect = bbox;
     result.radius = radius;
-    result.distance = distance;
+    result.distance_simple = distance_simple;
     result.circularity = best_circularity;
     result.area = best_area;
     result.valid = true;
     
+    // 使用PNP计算更精确的距离和姿态
+    calculatePoseWithPNP(result);
+    
     return result;
 }
 
-float GreenLightDetector::calculateDistance(float radius_pixels) {
-    // 使用相似三角形原理计算距离
-    // distance = (真实直径 * 焦距) / (像素直径)
-    if (radius_pixels <= 0) return 0;
+// float GreenLightDetector::calculateDistance(float radius_pixels) {
+//     // 使用相似三角形原理计算距离
+//     // distance = (真实直径 * 焦距) / (像素直径)
+//     if (radius_pixels <= 0) return 0;
     
-    float diameter_pixels = radius_pixels * 2;
-    float distance_mm = (config.real_diameter_mm * config.focal_length_pixels) / diameter_pixels;
-    float distance_m = distance_mm / 1000.0f;
+//     float diameter_pixels = radius_pixels * 2;
+//     float distance_mm = (config.real_diameter_mm * config.focal_length_pixels) / diameter_pixels;
+//     float distance_m = distance_mm / 1000.0f;
     
-    return distance_m;
-}
+//     return distance_m;
+// }
 
+
+// 更新sendDataToSerial函数，添加姿态角数据
 void GreenLightDetector::sendDataToSerial(const DetectedTarget& target) {
     if (!serial_port->isOpen() || !target.valid) {
         return;
     }
     
-    
     // 准备数据
     std::vector<uint8_t> data;
     
-    // 数据格式：数据类型(1字节) + X坐标(4字节) + Y坐标(4字节) + 距离(4字节)
-    data.push_back(0xA0);  // 数据类型：检测结果
+    // 数据格式：数据类型(1字节) + X坐标(4字节) + Y坐标(4字节) + 距离(4字节) 
+    //           + 俯仰角(4字节) + 方位角(4字节) + 云台俯仰角(4字节) + 云台方位角(4字节)
+    data.push_back(0xA1);  // 数据类型：带姿态的检测结果
     
     // 添加X坐标（float转4字节）
     float x = target.center.x;
@@ -360,10 +630,28 @@ void GreenLightDetector::sendDataToSerial(const DetectedTarget& target) {
     uint8_t* y_bytes = reinterpret_cast<uint8_t*>(&y);
     for (int i = 0; i < 4; ++i) data.push_back(y_bytes[i]);
     
-    // 添加距离
-    float d = target.distance;
+    // 添加PNP距离
+    float d = target.distance_pnp > 0 ? target.distance_pnp : target.distance_simple;
     uint8_t* d_bytes = reinterpret_cast<uint8_t*>(&d);
     for (int i = 0; i < 4; ++i) data.push_back(d_bytes[i]);
+    
+    // 添加相机坐标系姿态角
+    float pitch = target.pitch_deg;
+    uint8_t* pitch_bytes = reinterpret_cast<uint8_t*>(&pitch);
+    for (int i = 0; i < 4; ++i) data.push_back(pitch_bytes[i]);
+    
+    float yaw = target.yaw_deg;
+    uint8_t* yaw_bytes = reinterpret_cast<uint8_t*>(&yaw);
+    for (int i = 0; i < 4; ++i) data.push_back(yaw_bytes[i]);
+    
+    // 添加云台坐标系姿态角
+    float pitch_g = target.pitch_gimbal_deg;
+    uint8_t* pitch_g_bytes = reinterpret_cast<uint8_t*>(&pitch_g);
+    for (int i = 0; i < 4; ++i) data.push_back(pitch_g_bytes[i]);
+    
+    float yaw_g = target.yaw_gimbal_deg;
+    uint8_t* yaw_g_bytes = reinterpret_cast<uint8_t*>(&yaw_g);
+    for (int i = 0; i < 4; ++i) data.push_back(yaw_g_bytes[i]);
     
     // 使用协议处理器打包数据（包含帧头帧尾和CRC）
     auto packet = protocol_handler->packData(data, true);
@@ -373,12 +661,16 @@ void GreenLightDetector::sendDataToSerial(const DetectedTarget& target) {
     
     if (bytes_written > 0) {
         // 显示调试信息
-        cout << "Sent detection data: ";
+        cout << "Sent detection data with pose: ";
         cout << "X=" << x << ", Y=" << y << ", D=" << d;
+        cout << ", Pitch=" << pitch << "°, Yaw=" << yaw << "°";
+        cout << ", Pitch_g=" << pitch_g << "°, Yaw_g=" << yaw_g << "°";
         cout << " (" << bytes_written << " bytes)" << endl;
     }
 }
 
+
+// 更新drawResults函数，显示PNP计算结果
 void GreenLightDetector::drawResults(cv::Mat& frame, const DetectedTarget& target) {
     // 显示FPS
     static int frame_count = 0;
@@ -426,29 +718,53 @@ void GreenLightDetector::drawResults(cv::Mat& frame, const DetectedTarget& targe
     if (config.show_distance) {
         // 绘制信息面板
         int y_offset = 30;
-        int line_height = 30;
+        int line_height = 25;
         
-        string distance_text = format("Distance: %.2f m", target.distance);
+        // 选择距离显示（优先显示PNP距离）
+        float display_distance = target.distance_pnp > 0 ? target.distance_pnp : target.distance_simple;
+        string method = target.distance_pnp > 0 ? "(PNP)" : "(Simple)";
+        
+        string distance_text = format("Distance %s: %.2f m", method.c_str(), display_distance);
         putText(frame, distance_text, Point(10, y_offset), 
-                FONT_HERSHEY_SIMPLEX, 0.8, Scalar(0, 255, 0), 2);
+                FONT_HERSHEY_SIMPLEX, 0.7, Scalar(0, 255, 0), 2);
         
-        string position_text = format("Position: (%.0f, %.0f)", target.center.x, target.center.y);
+        string position_text = format("Image Pos: (%.0f, %.0f)", target.center.x, target.center.y);
         putText(frame, position_text, Point(10, y_offset + line_height), 
-                FONT_HERSHEY_SIMPLEX, 0.8, Scalar(0, 255, 0), 2);
+                FONT_HERSHEY_SIMPLEX, 0.7, Scalar(0, 255, 0), 2);
         
-        string circularity_text = format("Circularity: %.2f", target.circularity);
-        putText(frame, circularity_text, Point(10, y_offset + line_height * 2), 
-                FONT_HERSHEY_SIMPLEX, 0.8, Scalar(0, 255, 0), 2);
+        if (target.distance_pnp > 0 && config.show_pnp_results) {
+            // 显示3D位置
+            string world_pos_text = format("3D Pos: (%.2f, %.2f, %.2f) m", 
+                target.world_position.x, target.world_position.y, target.world_position.z);
+            putText(frame, world_pos_text, Point(10, y_offset + line_height * 2), 
+                    FONT_HERSHEY_SIMPLEX, 0.7, Scalar(255, 255, 0), 2);
+            
+            // 显示相机坐标系角度
+            string angles_text = format("Camera Angles: Pitch=%.1f°, Yaw=%.1f°", 
+                target.pitch_deg, target.yaw_deg);
+            putText(frame, angles_text, Point(10, y_offset + line_height * 3), 
+                    FONT_HERSHEY_SIMPLEX, 0.7, Scalar(255, 255, 0), 2);
+            
+            // 显示云台坐标系角度
+            if (target.pitch_gimbal_deg != 0 || target.yaw_gimbal_deg != 0) {
+                string gimbal_angles_text = format("Gimbal Angles: Pitch=%.1f°, Yaw=%.1f°", 
+                    target.pitch_gimbal_deg, target.yaw_gimbal_deg);
+                putText(frame, gimbal_angles_text, Point(10, y_offset + line_height * 4), 
+                        FONT_HERSHEY_SIMPLEX, 0.7, Scalar(255, 200, 0), 2);
+            }
+        }
         
-        string radius_text = format("Radius: %.1f px", target.radius);
-        putText(frame, radius_text, Point(10, y_offset + line_height * 3), 
-                FONT_HERSHEY_SIMPLEX, 0.8, Scalar(0, 255, 0), 2);
+        // 显示圆形度和面积
+        string circle_text = format("Circularity: %.2f", target.circularity);
+        putText(frame, circle_text, Point(frame.cols - 200, y_offset + line_height), 
+                FONT_HERSHEY_SIMPLEX, 0.7, Scalar(200, 200, 200), 2);
         
         string area_text = format("Area: %.0f px^2", target.area);
-        putText(frame, area_text, Point(10, y_offset + line_height * 4), 
-                FONT_HERSHEY_SIMPLEX, 0.8, Scalar(0, 255, 0), 2);
+        putText(frame, area_text, Point(frame.cols - 200, y_offset + line_height * 2), 
+                FONT_HERSHEY_SIMPLEX, 0.7, Scalar(200, 200, 200), 2);
     }
 }
+
 
 void GreenLightDetector::run() {
     // 初始化相机
@@ -467,6 +783,7 @@ void GreenLightDetector::run() {
     Mat frame;
     
     cout << "Starting detection loop. Press 'q' to quit." << endl;
+    cout << "Press 'p' to toggle PNP results display." << endl;
     
     while (true) {
         std::chrono::steady_clock::time_point timestamp;
@@ -505,11 +822,10 @@ void GreenLightDetector::run() {
         if (key == 'q' || key == 27) { // 'q' or ESC
             cout << "Exiting..." << endl;
             break;
+        } else if (key == 'p') {
+            config.show_pnp_results = !config.show_pnp_results;
+            cout << "PNP results display: " << (config.show_pnp_results ? "ON" : "OFF") << endl;
         }
     }
-}
-
-void GreenLightDetector::setConfig(const Config& new_config) {
-    config = new_config;
 }
 

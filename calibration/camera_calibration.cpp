@@ -1,9 +1,15 @@
+#include <fmt/core.h>
 #include <yaml-cpp/yaml.h>
-#include <opencv2/opencv.hpp>
-#include <iostream>
-#include <vector>
-#include <string>
+
 #include <fstream>
+#include <opencv2/opencv.hpp>
+
+#include "tools/img_tools.hpp"
+
+const std::string keys =
+  "{help h usage ? |                          | 输出命令行参数说明}"
+  "{config-path c  | /home/c/xzDart/config/calibration.yaml | yaml配置文件路径 }"
+  "{@input-folder  | /home/c/xzDart/assets/img_with_q       | 输入文件夹路径   }";
 
 std::vector<cv::Point3f> centers_3d(const cv::Size & pattern_size, const float center_distance)
 {
@@ -25,29 +31,34 @@ void load(
   auto yaml = YAML::LoadFile(config_path);
   auto pattern_cols = yaml["pattern_cols"].as<int>();
   auto pattern_rows = yaml["pattern_rows"].as<int>();
-  auto center_distance_mm = yaml["center_distance_mm"].as<double>();
+  auto square_size_mm = yaml["square_size_mm"].as<double>();
   cv::Size pattern_size(pattern_cols, pattern_rows);
 
   for (int i = 1; true; i++) {
     // 读取图片
-    std::string img_path = input_folder + "/" + std::to_string(i) + ".jpg";
+    auto img_path = fmt::format("{}/{}.jpg", input_folder, i);
     auto img = cv::imread(img_path);
     if (img.empty()) break;
 
     // 设置图片尺寸
     img_size = img.size();
 
+    // 转换为灰度图像（棋盘格检测需要）
+    cv::Mat gray;
+    cv::cvtColor(img, gray, cv::COLOR_BGR2GRAY);
+
     // 识别标定板
     std::vector<cv::Point2f> centers_2d;
-    auto success = cv::findChessboardCorners(img, pattern_size, centers_2d);
-
-    if (success) {
-      // 细化角点位置
-      cv::Mat gray;
-      cv::cvtColor(img, gray, cv::COLOR_BGR2GRAY);
-      cv::cornerSubPix(gray, centers_2d, cv::Size(11, 11), cv::Size(-1, -1), 
-                       cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 30, 0.1));
-    }
+    //auto success = cv::findCirclesGrid(img, pattern_size, centers_2d, cv::CALIB_CB_SYMMETRIC_GRID);
+    // 改为（对于棋盘格）：
+std::vector<cv::Point2f> corners;
+auto success = cv::findChessboardCorners(gray, pattern_size, corners);
+if (success) {
+    // 亚像素精确化
+    cv::cornerSubPix(gray, corners, cv::Size(11,11), cv::Size(-1,-1),
+                     cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 30, 0.1));
+    centers_2d = corners;  // 注意：对于棋盘格，corner点对应的是角点
+}
 
     // 显示识别结果
     auto drawing = img.clone();
@@ -57,12 +68,12 @@ void load(
     cv::waitKey(0);
 
     // 输出识别结果
-    std::cout << "[" << (success ? "success" : "failure") << "] " << img_path << std::endl;
+    fmt::print("[{}] {}\n", success ? "success" : "failure", img_path);
     if (!success) continue;
 
     // 记录所需的数据
     img_points.emplace_back(centers_2d);
-    obj_points.emplace_back(centers_3d(pattern_size, center_distance_mm));
+    obj_points.emplace_back(centers_3d(pattern_size, square_size_mm));
   }
 }
 
@@ -75,7 +86,7 @@ void print_yaml(const cv::Mat & camera_matrix, const cv::Mat & distort_coeffs, d
     distort_coeffs.begin<double>(), distort_coeffs.end<double>());
 
   result << YAML::BeginMap;
-  result << YAML::Comment("重投影误差: " + std::to_string(error) + "px");
+  result << YAML::Comment(fmt::format("重投影误差: {:.4f}px", error));
   result << YAML::Key << "camera_matrix";
   result << YAML::Value << YAML::Flow << camera_matrix_data;
   result << YAML::Key << "distort_coeffs";
@@ -83,17 +94,19 @@ void print_yaml(const cv::Mat & camera_matrix, const cv::Mat & distort_coeffs, d
   result << YAML::Newline;
   result << YAML::EndMap;
 
-  std::cout << "\n" << result.c_str() << std::endl;
+  fmt::print("\n{}\n", result.c_str());
 }
 
 int main(int argc, char * argv[])
 {
-  if (argc < 2) {
-    std::cout << "Usage: " << argv[0] << " <input_folder>" << std::endl;
-    return 1;
+  // 读取命令行参数
+  cv::CommandLineParser cli(argc, argv, keys);
+  if (cli.has("help")) {
+    cli.printMessage();
+    return 0;
   }
-  std::string input_folder = argv[1];
-  std::string config_path = "config/calibration.yaml";
+  auto input_folder = cli.get<std::string>(0);
+  auto config_path = cli.get<std::string>("config-path");
 
   // 从输入文件夹中加载标定所需的数据
   cv::Size img_size;
@@ -127,6 +140,4 @@ int main(int argc, char * argv[])
 
   // 输出yaml
   print_yaml(camera_matrix, distort_coeffs, error);
-
-  return 0;
 }
