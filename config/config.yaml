@@ -1,10 +1,11 @@
 # Green Light Detector Configuration
 camera_name: hikrobot
-exposure_ms: 10.0
+exposure_ms: 7.0
 gain: 13.0
-width: 1280
-height: 720
-fps: 30
+# 降低分辨率可大幅提升速度
+width: 640    # 从1280降低
+height: 480   # 从720降低
+fps: 60       # 提高帧率
 vid_pid: MV-CS016-10UC
 
 # Image Processing Configuration
@@ -14,8 +15,8 @@ s_min: 100
 s_max: 255
 v_min: 100
 v_max: 255
-morph_open_size: 2
-morph_close_size: 5
+morph_open_size: 1    # 减小形态学核
+morph_close_size: 3   # 减小形态学核
 min_circularity: 0.7
 min_area: 50
 max_area: 10000

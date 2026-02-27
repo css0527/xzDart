@@ -6,6 +6,7 @@
 #include <vector>
 #include <memory>
 #include <chrono>
+#include <deque>
 
 // 前向声明，避免循环依赖
 class SerialPort;
@@ -86,6 +87,13 @@ struct Config {
     bool show_pnp_results;           // 是否显示PNP计算结果
     float window_scale;
     
+    // 鲁棒性配置
+    int smoothing_frames;             // 用于平滑的帧数
+    float gaussian_blur_sigma;        // 高斯模糊的标准差
+    float bilateral_filter_sigma;     // 双边滤波的标准差
+    bool enable_kalman_filter;        // 是否启用卡尔曼滤波
+    int min_consecutive_frames;       // 最小连续检测帧数
+    
     // PNP计算相关配置
     float target_radius_3d;          // 目标在3D空间中的半径（米）
 };
@@ -102,6 +110,18 @@ private:
     // 当前检测目标
     DetectedTarget target;
     
+    // 卡尔曼滤波器状态（用于平滑中心点和半径）
+    cv::KalmanFilter kf_center;          // 中心点卡尔曼滤波器
+    cv::KalmanFilter kf_radius;          // 半径卡尔曼滤波器
+    cv::Mat kf_center_measurement;       // 中心点测量值
+    cv::Mat kf_radius_measurement;       // 半径测量值
+    bool kf_initialized;                  // 卡尔曼滤波器是否已初始化
+    
+    // 帧历史记录
+    std::deque<DetectedTarget> frame_history;  // 历史帧缓存
+    int valid_frames_count;                     // 连续有效检测的帧数
+    DetectedTarget last_valid_target;           // 上一个有效检测
+    
     // 从文件加载配置（包括相机内参和相机-云台转换）
     bool loadConfig(const std::string& config_path);
     
@@ -110,6 +130,18 @@ private:
     
     // 初始化相机
     bool initCamera();
+    
+    // 初始化卡尔曼滤波器
+    void initializeKalmanFilter();
+    
+    // 应用卡尔曼滤波进行平滑
+    DetectedTarget applyKalmanSmoothing(const DetectedTarget& raw_target);
+    
+    // 应用时间连续性检查
+    DetectedTarget applyTemporalSmoothing(const DetectedTarget& raw_target);
+    
+    // 预处理图像：降噪和模糊
+    cv::Mat preprocessFrame(const cv::Mat& frame);
     
     // 处理单帧图像
     DetectedTarget processFrame(cv::Mat& frame);

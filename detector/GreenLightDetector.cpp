@@ -24,7 +24,9 @@ const float RAD_TO_DEG = 180.0f / CV_PI;
 // GreenLightDetector 实现
 GreenLightDetector::GreenLightDetector() 
     : serial_port(std::unique_ptr<SerialPort>(new SerialPort()))
-    , protocol_handler(std::unique_ptr<ProtocolHandler>(new ProtocolHandler())) {
+    , protocol_handler(std::unique_ptr<ProtocolHandler>(new ProtocolHandler()))
+    , kf_initialized(false)
+    , valid_frames_count(0) {
 }
 
 GreenLightDetector::~GreenLightDetector() {
@@ -166,6 +168,22 @@ bool GreenLightDetector::loadConfig(const std::string& config_path) {
         if (auto val = tools::read_optional<bool>(config_yaml, "show_mask")) config.show_mask = *val;
         if (auto val = tools::read_optional<float>(config_yaml, "window_scale")) config.window_scale = *val;
         
+        // 鲁棒性配置
+        if (auto val = tools::read_optional<int>(config_yaml, "smoothing_frames")) config.smoothing_frames = *val;
+        else config.smoothing_frames = 3;  // 默认值
+        
+        if (auto val = tools::read_optional<float>(config_yaml, "gaussian_blur_sigma")) config.gaussian_blur_sigma = *val;
+        else config.gaussian_blur_sigma = 1.0f;  // 默认值
+        
+        if (auto val = tools::read_optional<float>(config_yaml, "bilateral_filter_sigma")) config.bilateral_filter_sigma = *val;
+        else config.bilateral_filter_sigma = 75.0f;  // 默认值
+        
+        if (auto val = tools::read_optional<bool>(config_yaml, "enable_kalman_filter")) config.enable_kalman_filter = *val;
+        else config.enable_kalman_filter = true;  // 默认启用
+        
+        if (auto val = tools::read_optional<int>(config_yaml, "min_consecutive_frames")) config.min_consecutive_frames = *val;
+        else config.min_consecutive_frames = 2;  // 默认值
+        
         // 默认显示PNP结果
         config.show_pnp_results = true;
         
@@ -229,6 +247,129 @@ bool GreenLightDetector::initialize(const std::string& config_path) {
     return true;
 }
 
+void GreenLightDetector::initializeKalmanFilter() {
+    if (kf_initialized) return;
+    
+    // 初始化中心点卡尔曼滤波器 (2D: x, y 坐标)
+    kf_center.init(4, 2, 0);  // 4个状态变量, 2个测量值
+    
+    // 状态转移矩阵 [x, y, vx, vy]
+    setIdentity(kf_center.transitionMatrix);
+    kf_center.transitionMatrix.at<float>(0, 2) = 1.0f;  // x += vx
+    kf_center.transitionMatrix.at<float>(1, 3) = 1.0f;  // y += vy
+    
+    // 测量矩阵 [x, y]
+    setIdentity(kf_center.measurementMatrix, Scalar::all(1));
+    kf_center.measurementMatrix.resize(2, 4);
+    
+    // 过程噪声协方差
+    setIdentity(kf_center.processNoiseCov, Scalar::all(1e-4));
+    
+    // 测量噪声协方差
+    setIdentity(kf_center.measurementNoiseCov, Scalar::all(1e-1));
+    
+    // 初始化半径卡尔曼滤波器 (1D: radius)
+    kf_radius.init(2, 1, 0);  // 2个状态变量, 1个测量值
+    
+    // 状态转移矩阵 [r, v_r]
+    setIdentity(kf_radius.transitionMatrix);
+    kf_radius.transitionMatrix.at<float>(0, 1) = 1.0f;  // r += v_r
+    
+    // 测量矩阵 [r]
+    setIdentity(kf_radius.measurementMatrix, Scalar::all(1));
+    kf_radius.measurementMatrix.resize(1, 2);
+    
+    // 过程噪声协方差
+    setIdentity(kf_radius.processNoiseCov, Scalar::all(1e-4));
+    
+    // 测量噪声协方差
+    setIdentity(kf_radius.measurementNoiseCov, Scalar::all(1e-1));
+    
+    kf_initialized = true;
+}
+
+DetectedTarget GreenLightDetector::applyKalmanSmoothing(const DetectedTarget& raw_target) {
+    if (!config.enable_kalman_filter || !kf_initialized) {
+        return raw_target;
+    }
+    
+    DetectedTarget smoothed = raw_target;
+    
+    if (raw_target.valid) {
+        // 更新中心点滤波器
+        Mat prediction_center = kf_center.predict();
+        kf_center_measurement = (Mat_<float>(2, 1) << raw_target.center.x, raw_target.center.y);
+        Mat correction_center = kf_center.correct(kf_center_measurement);
+        smoothed.center.x = correction_center.at<float>(0);
+        smoothed.center.y = correction_center.at<float>(1);
+        
+        // 更新半径滤波器
+        Mat prediction_radius = kf_radius.predict();
+        kf_radius_measurement = (Mat_<float>(1, 1) << raw_target.radius);
+        Mat correction_radius = kf_radius.correct(kf_radius_measurement);
+        smoothed.radius = correction_radius.at<float>(0);
+    }
+    
+    return smoothed;
+}
+
+DetectedTarget GreenLightDetector::applyTemporalSmoothing(const DetectedTarget& raw_target) {
+    DetectedTarget result = raw_target;
+    
+    // 添加到历史缓存
+    frame_history.push_back(raw_target);
+    if (frame_history.size() > config.smoothing_frames) {
+        frame_history.pop_front();
+    }
+    
+    if (raw_target.valid) {
+        valid_frames_count++;
+        last_valid_target = raw_target;
+    } else {
+        valid_frames_count = 0;
+    }
+    
+    // 如果当前帧无效，但前面有有效的历史帧，使用平均值
+    if (!raw_target.valid && valid_frames_count < config.min_consecutive_frames) {
+        int valid_count = 0;
+        Point2f avg_center(0, 0);
+        float avg_radius = 0;
+        
+        for (const auto& target : frame_history) {
+            if (target.valid) {
+                valid_count++;
+                avg_center += target.center;
+                avg_radius += target.radius;
+            }
+        }
+        
+        if (valid_count > 0) {
+            result.center = avg_center / valid_count;
+            result.radius = avg_radius / valid_count;
+            result.valid = true;
+        }
+    }
+    
+    return result;
+}
+
+Mat GreenLightDetector::preprocessFrame(const Mat& frame) {
+    Mat processed = frame.clone();
+    
+    // 应用高斯模糊以减少噪声
+    if (config.gaussian_blur_sigma > 0) {
+        int kernel_size = static_cast<int>(config.gaussian_blur_sigma * 2) * 2 + 1;
+        GaussianBlur(processed, processed, Size(kernel_size, kernel_size), config.gaussian_blur_sigma);
+    }
+    
+    // 应用双边滤波以保留边界同时平滑区域
+    if (config.bilateral_filter_sigma > 0) {
+        bilateralFilter(processed, processed, 9, config.bilateral_filter_sigma, config.bilateral_filter_sigma);
+    }
+    
+    return processed;
+}
+
 float GreenLightDetector::calculateSimpleDistance(float radius_pixels) {
     // 使用相似三角形原理计算距离
     // distance = (真实直径 * 焦距) / (像素直径)
@@ -252,7 +393,7 @@ void GreenLightDetector::calculatePoseWithPNP(DetectedTarget& target) {
     
     // 创建更密集的点集以获得更好的精度
     vector<Point3f> object_points;
-    int num_points = 16;  // 使用16个点，增加精度
+    int num_points = 6;  // 使用6个点，减少计算量
     
     for (int i = 0; i < num_points; i++) {
         float angle = 2 * CV_PI * i / num_points;
@@ -814,7 +955,11 @@ void GreenLightDetector::run() {
                 display_frame = frame;
             }
             
-            imshow("Green Light Detection", display_frame);
+             // 转换为RGB颜色空间
+            Mat rgb_display;
+            cvtColor(display_frame, rgb_display, COLOR_BGR2RGB);
+            
+            imshow("Green Light Detection", rgb_display);
         }
         
         // 按键处理
