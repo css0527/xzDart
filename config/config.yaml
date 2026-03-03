@@ -30,13 +30,23 @@ serial_port: /dev/ttyCH341USB0
 serial_baudrate: 115200
 serial_data_format: X:%.2f,Y:%.2f,D:%.2f
 
+# 电机配置 - 控制飞镖发射装置左右移动
+motor_config:
+  # 电机转一圈对应的水平距离（毫米）
+  distance_per_rotation_mm: 10.0
+  # 电机转圈数的限制（正为向右，负为向左）
+  max_rotations: 5.0
+  min_rotations: -5.0
+
 # 协议配置
 serial_protocol:
-  rx_header: "AA55"      # 接收帧头，十六进制字符串
-  rx_footer: "55AA"      # 接收帧尾
-  tx_header: "BB66"      # 发送帧头
-  tx_footer: "66BB"      # 发送帧尾
-  use_crc: true          # 是否使用CRC校验
+  tx_header: 0xED        # 发送帧头（十进制，0xED）
+  tx_footer: 0xEC        # 发送帧尾（十进制，0xEC）
+  rx_header: 0x78        # 接收帧头（IMU数据帧头）
+  rx_footer: 0x76        # 接收帧尾（IMU数据帧尾）
+  tx_frame_length: 6     # 发送帧长度（字节）：帧头(1) + 电机转圈数(4) + 帧尾(1) = 6
+  rx_frame_length: 14    # 接收帧长度（字节）
+  use_crc: false         # 是否使用CRC校验（当前未使用）
 
 # Display Configuration
 show_preview: true

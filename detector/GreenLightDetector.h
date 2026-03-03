@@ -8,14 +8,9 @@
 #include <chrono>
 #include <deque>
 
-// 前向声明，避免循环依赖
-class SerialPort;
-struct ReceivedFrame;  // 前向声明
-class ProtocolHandler; // 前向声明
-
-#include "../serial/serial.hpp"
-#include "../serial/protocol_handler.hpp"  // 包含协议处理器头文件
+#include "../io/serial_cboard.hpp"  // 包含串口类定义
 #include "../io/camera.hpp"
+#include "../io/command.hpp"
 
 // 检测到的目标结构体
 struct DetectedTarget {
@@ -96,15 +91,19 @@ struct Config {
     
     // PNP计算相关配置
     float target_radius_3d;          // 目标在3D空间中的半径（米）
+    
+    // 电机配置 - 控制飞镖发射装置
+    float motor_distance_per_rotation_mm;  // 每圈对应的距离（毫米）
+    float motor_max_rotations;             // 最大转圈数（向右）
+    float motor_min_rotations;             // 最小转圈数（向左）
 };
 
 // 主检测器类
 class GreenLightDetector {
 private:
     Config config;
-    std::unique_ptr<SerialPort> serial_port;
-    std::unique_ptr<ProtocolHandler> protocol_handler;
     std::unique_ptr<io::Camera> camera_;
+    std::unique_ptr<io::SerialBoard> serial_board_;  // 添加：使用真实的 SerialBoard
     std::string config_path;
     
     // 当前检测目标
@@ -161,10 +160,6 @@ private:
     // 在图像上绘制结果
     void drawResults(cv::Mat& frame, const DetectedTarget& target);
     
-    // 新增：串口数据处理
-    void processSerialData();
-    void onFrameReceived(const ReceivedFrame& frame);
-    void generateResponse(const ReceivedFrame& frame);
     
 public:
     GreenLightDetector();

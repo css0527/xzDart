@@ -11,7 +11,7 @@
 #include <cmath>
 
 // 确保先包含协议处理器头文件
-#include "../serial/protocol_handler.hpp"
+#include "../io/serial_cboard.hpp"
 #include "../tools/yaml.hpp"
 
 using namespace std;
@@ -23,9 +23,7 @@ const float RAD_TO_DEG = 180.0f / CV_PI;
 
 // GreenLightDetector 实现
 GreenLightDetector::GreenLightDetector() 
-    : serial_port(std::unique_ptr<SerialPort>(new SerialPort()))
-    , protocol_handler(std::unique_ptr<ProtocolHandler>(new ProtocolHandler()))
-    , kf_initialized(false)
+    : kf_initialized(false)
     , valid_frames_count(0) {
 }
 
@@ -187,6 +185,36 @@ bool GreenLightDetector::loadConfig(const std::string& config_path) {
         // 默认显示PNP结果
         config.show_pnp_results = true;
         
+        // 电机配置
+        if (auto motor_cfg = tools::read_optional<std::map<std::string, float>>(config_yaml, "motor_config")) {
+            if (motor_cfg->count("distance_per_rotation_mm")) {
+                config.motor_distance_per_rotation_mm = motor_cfg->at("distance_per_rotation_mm");
+            } else {
+                config.motor_distance_per_rotation_mm = 10.0f;  // 默认值
+            }
+            
+            if (motor_cfg->count("max_rotations")) {
+                config.motor_max_rotations = motor_cfg->at("max_rotations");
+            } else {
+                config.motor_max_rotations = 5.0f;
+            }
+            
+            if (motor_cfg->count("min_rotations")) {
+                config.motor_min_rotations = motor_cfg->at("min_rotations");
+            } else {
+                config.motor_min_rotations = -5.0f;
+            }
+        } else {
+            // 默认值
+            config.motor_distance_per_rotation_mm = 10.0f;
+            config.motor_max_rotations = 5.0f;
+            config.motor_min_rotations = -5.0f;
+        }
+        
+        cout << "Motor config loaded: distance_per_rotation=" << config.motor_distance_per_rotation_mm 
+             << "mm, max_rotations=" << config.motor_max_rotations 
+             << ", min_rotations=" << config.motor_min_rotations << endl;
+        
         cout << "Configuration loaded from " << config_path << endl;
         return true;
     }
@@ -210,38 +238,14 @@ bool GreenLightDetector::initialize(const std::string& config_path) {
         return false;
     }
     
-    // 初始化串口
-    if (!serial_port->open(config.serial_port, config.serial_baudrate)) {
-        cerr << "Warning: Serial port initialization failed. Continuing without serial..." << endl;
-        cerr << "To fix: sudo chmod 666 " << config.serial_port << endl;
-    } else {
-        cout << "Serial port initialized successfully" << endl;
-
-         // 配置协议处理器
-        // 设置接收帧头帧尾（根据实际协议）
-        std::vector<uint8_t> rx_header = {0xAA, 0x55};  // 接收帧头
-        std::vector<uint8_t> rx_footer = {0x55, 0xAA};  // 接收帧尾
-        protocol_handler->setReceiveHeader(rx_header);
-        protocol_handler->setReceiveFooter(rx_footer);
-        
-        // 设置发送帧头帧尾
-        std::vector<uint8_t> tx_header = {0xBB, 0x66};  // 发送帧头
-        std::vector<uint8_t> tx_footer = {0x66, 0xBB};  // 发送帧尾
-        protocol_handler->setTransmitHeader(tx_header);
-        protocol_handler->setTransmitFooter(tx_footer);
-        
-        // 设置CRC校验
-        protocol_handler->setUseCRC(true);
-        
-        // 设置回调函数
-        protocol_handler->setFrameReceivedCallback(
-            [this](const ReceivedFrame& frame) {
-                this->onFrameReceived(frame);
-            }
-        );
-        
-        // 启动异步处理
-        protocol_handler->startAsyncProcessing();
+    // 初始化串口（使用实际的 SerialBoard）
+    try {
+        serial_board_ = std::make_unique<io::SerialBoard>(config_path);
+        cout << "Serial board initialized successfully" << endl;
+    } catch (const std::exception& e) {
+        cerr << "Warning: Serial board initialization failed: " << e.what() << endl;
+        cerr << "Continuing without serial communication..." << endl;
+        serial_board_ = nullptr;
     }
     
     return true;
@@ -318,7 +322,7 @@ DetectedTarget GreenLightDetector::applyTemporalSmoothing(const DetectedTarget& 
     
     // 添加到历史缓存
     frame_history.push_back(raw_target);
-    if (frame_history.size() > config.smoothing_frames) {
+    if (frame_history.size() > static_cast<size_t>(config.smoothing_frames)) {
         frame_history.pop_front();
     }
     
@@ -454,7 +458,7 @@ void GreenLightDetector::calculatePoseWithPNP(DetectedTarget& target) {
                 double error = norm(image_points[i] - projected_points[i]);
                 total_error += error * error;
             }
-            double mean_error = sqrt(total_error / image_points.size());
+            // double mean_error = sqrt(total_error / image_points.size());  // 未使用
             
             cout << "PNP计算成功!" << endl;
             cout << "距离: " << target.distance_pnp << " 米" << endl;
@@ -524,110 +528,6 @@ void GreenLightDetector::calculateAngles(DetectedTarget& target) {
             target.pitch_gimbal_deg = asin(y_g / distance_g) * RAD_TO_DEG;
             target.yaw_gimbal_deg = atan2(x_g, z_g) * RAD_TO_DEG;
         }
-    }
-}
-// 新增：串口数据处理线程
-void GreenLightDetector::processSerialData() {
-    const int BUFFER_SIZE = 1024;
-    uint8_t buffer[BUFFER_SIZE];
-    
-    while (serial_port->isOpen()) {
-        int bytes_read = serial_port->read(buffer, BUFFER_SIZE, 10); // 10ms超时
-        
-        if (bytes_read > 0) {
-            // 将数据喂给协议处理器
-            protocol_handler->feedData(buffer, bytes_read);
-            
-            // 也可以直接处理原始数据
-            // cout << "Received raw data: ";
-            // for (int i = 0; i < bytes_read; ++i) {
-            //     printf("%02X ", buffer[i]);
-            // }
-            // cout << endl;
-        }
-        
-        // 短暂休眠，避免CPU占用过高
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-}
-
-// 新增：接收到完整帧的回调
-void GreenLightDetector::onFrameReceived(const ReceivedFrame& frame) {
-    cout << "Received frame: " << endl;
-    cout << "  Header: ";
-    for (auto b : frame.header) printf("%02X ", b);
-    cout << endl;
-    
-    cout << "  Data: ";
-    for (auto b : frame.data) {
-        if (b >= 32 && b <= 126) {
-            cout << static_cast<char>(b);
-        } else {
-            printf("[%02X]", b);
-        }
-    }
-    cout << endl;
-    
-    cout << "  Footer: ";
-    for (auto b : frame.footer) printf("%02X ", b);
-    cout << endl;
-    
-    cout << "  CRC: " << (frame.crc_valid ? "Valid" : "Invalid") << endl;
-    
-    // 生成响应数据
-    generateResponse(frame);
-}
-
-void GreenLightDetector::generateResponse(const ReceivedFrame& frame) {
-    if (!serial_port->isOpen()) return;
-    
-    // 示例：解析接收到的命令
-    if (!frame.data.empty()) {
-        // 假设第一个字节是命令码
-        uint8_t command = frame.data[0];
-        
-        std::vector<uint8_t> response_data;
-        
-        switch (command) {
-            case 0x01:  // 获取状态
-                response_data = {0x01, 0x00};  // 状态正常
-                break;
-                
-            case 0x02:  // 获取检测结果
-                // 这里可以填充实际的检测数据
-                {
-                    float x = target.center.x;
-                    float y = target.center.y;
-                    // 修复：使用正确的成员名
-                    float d = target.distance_pnp > 0 ? target.distance_pnp : target.distance_simple;
-                    
-                    uint8_t* x_bytes = reinterpret_cast<uint8_t*>(&x);
-                    uint8_t* y_bytes = reinterpret_cast<uint8_t*>(&y);
-                    uint8_t* d_bytes = reinterpret_cast<uint8_t*>(&d);
-                    
-                    response_data = {0x02};  // 命令码
-                    for (int i = 0; i < 4; ++i) response_data.push_back(x_bytes[i]);
-                    for (int i = 0; i < 4; ++i) response_data.push_back(y_bytes[i]);
-                    for (int i = 0; i < 4; ++i) response_data.push_back(d_bytes[i]);
-                }
-                break;
-                
-            case 0x03:  // 设置参数
-                // 解析设置参数并更新配置
-                // ... 参数解析代码
-                response_data = {0x03, 0x01};  // 设置成功
-                break;
-                
-            default:
-                response_data = {0xFF, 0x00};  // 未知命令
-                break;
-        }
-        
-        // 打包数据并发送
-        auto packet = protocol_handler->packData(response_data, true);
-        serial_port->write(packet.data(), packet.size());
-        
-        cout << "Sent response packet" << endl;
     }
 }
 bool GreenLightDetector::initCamera() {
@@ -747,67 +647,53 @@ DetectedTarget GreenLightDetector::processFrame(cv::Mat& frame) {
 //     return distance_m;
 // }
 
-
-// 更新sendDataToSerial函数，添加姿态角数据
+// 更新sendDataToSerial函数，使用 SerialBoard 发送目标数据和电机转圈数
 void GreenLightDetector::sendDataToSerial(const DetectedTarget& target) {
-    if (!serial_port->isOpen() || !target.valid) {
+    // 检查是否成功初始化了串口
+    if (!serial_board_) {
         return;
     }
     
-    // 准备数据
-    std::vector<uint8_t> data;
-    
-    // 数据格式：数据类型(1字节) + X坐标(4字节) + Y坐标(4字节) + 距离(4字节) 
-    //           + 俯仰角(4字节) + 方位角(4字节) + 云台俯仰角(4字节) + 云台方位角(4字节)
-    data.push_back(0xA1);  // 数据类型：带姿态的检测结果
-    
-    // 添加X坐标（float转4字节）
-    float x = target.center.x;
-    uint8_t* x_bytes = reinterpret_cast<uint8_t*>(&x);
-    for (int i = 0; i < 4; ++i) data.push_back(x_bytes[i]);
-    
-    // 添加Y坐标
-    float y = target.center.y;
-    uint8_t* y_bytes = reinterpret_cast<uint8_t*>(&y);
-    for (int i = 0; i < 4; ++i) data.push_back(y_bytes[i]);
-    
-    // 添加PNP距离
-    float d = target.distance_pnp > 0 ? target.distance_pnp : target.distance_simple;
-    uint8_t* d_bytes = reinterpret_cast<uint8_t*>(&d);
-    for (int i = 0; i < 4; ++i) data.push_back(d_bytes[i]);
-    
-    // 添加相机坐标系姿态角
-    float pitch = target.pitch_deg;
-    uint8_t* pitch_bytes = reinterpret_cast<uint8_t*>(&pitch);
-    for (int i = 0; i < 4; ++i) data.push_back(pitch_bytes[i]);
-    
-    float yaw = target.yaw_deg;
-    uint8_t* yaw_bytes = reinterpret_cast<uint8_t*>(&yaw);
-    for (int i = 0; i < 4; ++i) data.push_back(yaw_bytes[i]);
-    
-    // 添加云台坐标系姿态角
-    float pitch_g = target.pitch_gimbal_deg;
-    uint8_t* pitch_g_bytes = reinterpret_cast<uint8_t*>(&pitch_g);
-    for (int i = 0; i < 4; ++i) data.push_back(pitch_g_bytes[i]);
-    
-    float yaw_g = target.yaw_gimbal_deg;
-    uint8_t* yaw_g_bytes = reinterpret_cast<uint8_t*>(&yaw_g);
-    for (int i = 0; i < 4; ++i) data.push_back(yaw_g_bytes[i]);
-    
-    // 使用协议处理器打包数据（包含帧头帧尾和CRC）
-    auto packet = protocol_handler->packData(data, true);
-    
-    // 发送数据
-    int bytes_written = serial_port->write(packet.data(), packet.size());
-    
-    if (bytes_written > 0) {
-        // 显示调试信息
-        cout << "Sent detection data with pose: ";
-        cout << "X=" << x << ", Y=" << y << ", D=" << d;
-        cout << ", Pitch=" << pitch << "°, Yaw=" << yaw << "°";
-        cout << ", Pitch_g=" << pitch_g << "°, Yaw_g=" << yaw_g << "°";
-        cout << " (" << bytes_written << " bytes)" << endl;
+    if (!target.valid) {
+        return;
     }
+    
+    // 使用 SerialBoard 的 Command 结构发送数据
+    // 目标的方位角(yaw)和俯仰角(pitch)映射到云台坐标系
+    io::Command cmd;
+    cmd.yaw = target.yaw_gimbal_deg;      // 使用云台坐标系的方位角
+    cmd.pitch = target.pitch_gimbal_deg;  // 使用云台坐标系的俯仰角
+    cmd.control = target.valid ? 1 : 0;   // 目标有效时为 1
+    cmd.shoot = 0;                        // 不发射
+    cmd.horizon_distance = target.distance_pnp > 0 ? 
+                          target.distance_pnp : target.distance_simple;
+    
+    // 计算电机转圈数：根据云台方位角(yaw)与发射装置的水平距离
+    // yaw 为目标相对于云台的方位角（度数），转换为对应的电机转圈数
+    // 公式：电机转圈数 = yaw角度(度) / 360 * (motor_distance_per_rotation_mm / distance_per_rotation_mm)
+    if (config.motor_distance_per_rotation_mm > 0) {
+        // 简化公式：目标方位角 / 360 表示相对于一整圈的比例
+        // 电机转圈数 = 目标方位角比例 * 电机转圈数变化范围
+        float motor_rotations = (target.yaw_gimbal_deg / 360.0f) * config.motor_distance_per_rotation_mm;
+        
+        // 限制电机转圈数在允许范围内
+        motor_rotations = std::clamp(motor_rotations, config.motor_min_rotations, config.motor_max_rotations);
+        
+        cmd.motor_rotations = motor_rotations;
+        
+        tools::logger()->debug("[Motor] yaw_gimbal_deg={:.2f}°, motor_rotations={:.3f}", 
+                              target.yaw_gimbal_deg, motor_rotations);
+    } else {
+        cmd.motor_rotations = 0.0;
+    }
+    
+    // 发送命令到串口
+    serial_board_->send(cmd);
+    
+    // 调试输出
+    cout << "Sent to serial: yaw=" << cmd.yaw << "°, pitch=" << cmd.pitch 
+         << "°, distance=" << cmd.horizon_distance << "m"
+         << ", motor_rotations=" << cmd.motor_rotations << endl;
 }
 
 
@@ -911,14 +797,6 @@ void GreenLightDetector::run() {
     // 初始化相机
     if (!initCamera()) {
         return;
-    }
-    
-    // 启动串口数据读取线程（如果串口已打开）
-    std::thread serial_thread;
-    if (serial_port->isOpen()) {
-        serial_thread = std::thread([this]() {
-            this->processSerialData();
-        });
     }
 
     Mat frame;

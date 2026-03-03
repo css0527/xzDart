@@ -21,14 +21,22 @@ find_package(fmt REQUIRED)
 # 查找线程库
 find_package(Threads REQUIRED)
 
+# 查找 Eigen3 库
+find_package(Eigen3 REQUIRED)
+
+# 如果 find_package 成功，它会设置 EIGEN3_INCLUDE_DIR 变量
+# 将这个目录添加到头文件搜索路径中
+include_directories(${EIGEN3_INCLUDE_DIR})
+
 # 包含目录 - 确保 tools 目录被包含
 include_directories(${CMAKE_SOURCE_DIR})
 include_directories(${OpenCV_INCLUDE_DIRS})
 include_directories(${CMAKE_SOURCE_DIR}/detector)
-include_directories(${CMAKE_SOURCE_DIR}/serial)
 include_directories(${CMAKE_SOURCE_DIR}/tools)  # 确保这行存在
 include_directories(${CMAKE_SOURCE_DIR}/io)
 include_directories(${CMAKE_SOURCE_DIR}/io/hikrobot/include)
+include_directories(${CMAKE_SOURCE_DIR}/io/serial/include)
+
 
 # 或者使用 target_include_directories (更推荐的方式)
 # ...
@@ -40,13 +48,12 @@ link_directories(io/hikrobot/lib/amd64)
 add_executable(main
     main.cpp
     detector/GreenLightDetector.cpp
-    serial/serial.cpp
-    serial/crc.cpp
-    serial/protocol_handler.cpp
     io/camera.cpp
     io/hikrobot/hikrobot.cpp
+    io/serial_cboard.cpp
     tools/logger.cpp
     tools/img_tools.cpp
+    tools/math_tools.cpp
 )
 
 add_executable(camera_calibration
@@ -58,10 +65,10 @@ add_executable(camera_calibration
 target_include_directories(main PRIVATE
     ${OpenCV_INCLUDE_DIRS}
     ${CMAKE_SOURCE_DIR}/detector
-    ${CMAKE_SOURCE_DIR}/serial
     ${CMAKE_SOURCE_DIR}/tools
     ${CMAKE_SOURCE_DIR}/io
     ${CMAKE_SOURCE_DIR}/io/hikrobot/include
+    ${CMAKE_SOURCE_DIR}/io/serial/include
 )
 
 target_include_directories(camera_calibration PRIVATE
