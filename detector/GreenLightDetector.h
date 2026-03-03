@@ -11,6 +11,7 @@
 #include "../io/serial_cboard.hpp"  // 包含串口类定义
 #include "../io/camera.hpp"
 #include "../io/command.hpp"
+#include <random>
 
 // 检测到的目标结构体
 struct DetectedTarget {
@@ -96,6 +97,15 @@ struct Config {
     float motor_distance_per_rotation_mm;  // 每圈对应的距离（毫米）
     float motor_max_rotations;             // 最大转圈数（向右）
     float motor_min_rotations;             // 最小转圈数（向左）
+    // 可选：通过配置强制发送固定圈数（不按 yaw 计算）
+    bool force_motor_rotations;            // 是否强制使用配置的圈数
+    float default_motor_rotations;         // 强制发送的圈数
+    
+        // 飞镖检测策略
+        enum class DartStrategy { Fixed, RandomFixed };
+        DartStrategy dart_strategy = DartStrategy::Fixed;
+        float random_move_range_degrees = 0.0f;  // 随机移动范围
+        bool random_move_after_hit = false;       // 命中后是否立刻改变位置
 };
 
 // 主检测器类
@@ -108,6 +118,18 @@ private:
     
     // 当前检测目标
     DetectedTarget target;
+
+    // dart module 状态
+    double initial_motor_rotations;      // 系统启动时的圈数位置
+    double current_motor_rotations;      // 当前目标圈数位置
+    bool detection_window_active;        // 检测窗口是否开启
+    std::mt19937 rng;                    // 随机数生成器
+
+    // 事件处理
+    void onGateOpening();               // 闸门开始打开
+    void onGateFullyOpened();           // 闸门完全打开前到达随机位置
+    void onDetectionWindowEnd();        // 检测窗口结束，恢复初始位置
+    void onDartHit();                   // 飞镖命中
     
     // 卡尔曼滤波器状态（用于平滑中心点和半径）
     cv::KalmanFilter kf_center;          // 中心点卡尔曼滤波器

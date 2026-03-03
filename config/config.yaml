@@ -37,14 +37,36 @@ motor_config:
   # 电机转圈数的限制（正为向右，负为向左）
   max_rotations: 5.0
   min_rotations: -5.0
+  # 强制发送固定圈数（不按目标yaw计算）
+  force_motor_rotations: true
+  default_motor_rotations: 10.5
+
+# 飞镖检测策略（two modes）
+#   fixed          - 固定目标：模块保持初始位置不变
+#   random_fixed   - 随机固定目标：闸门开启期间先移动到随机角度，
+#                    窗口期结束恢复初始位置；若命中则再生成新随机位置
+dart_strategy: fixed          # 或 random_fixed
+
+# 如需调整随机偏移范围，可设置以下项（角度/圈）
+random_move_range_degrees: 30.0   # yaw 随机移动范围
+random_move_after_hit: true       # 命中后是否立即改变位置
+
+# 方法1（仅改配置）示例：通过调整下面参数影响最终发送值（不改代码）
+# 电机转一圈对应的水平距离（毫米）
+# 电机转圈数的限制（正为向右，负为向左）
+# motor_config:
+#   distance_per_rotation_mm: 5.0
+#   max_rotations: 2.0
+#   min_rotations: -2.0
 
 # 协议配置
 serial_protocol:
-  tx_header: 0xED        # 发送帧头（十进制，0xED）
-  tx_footer: 0xEC        # 发送帧尾（十进制，0xEC）
+  tx_header: 0xA5        # 发送包头（设置圈数协议）
+  tx_cmd_id: 0x01        # 指令ID：设置圈数
+  tx_data_length: 0x04   # 数据长度：float占4字节
+  tx_frame_length: 8     # 发送帧长度：包头(1) + 指令ID(1) + 数据长度(1) + 数据(4) + 校验和(1) = 8
   rx_header: 0x78        # 接收帧头（IMU数据帧头）
   rx_footer: 0x76        # 接收帧尾（IMU数据帧尾）
-  tx_frame_length: 6     # 发送帧长度（字节）：帧头(1) + 电机转圈数(4) + 帧尾(1) = 6
   rx_frame_length: 14    # 接收帧长度（字节）
   use_crc: false         # 是否使用CRC校验（当前未使用）
 

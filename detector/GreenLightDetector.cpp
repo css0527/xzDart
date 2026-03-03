@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <stdexcept>
 #include <cmath>
+#include <random>
 
 // 确保先包含协议处理器头文件
 #include "../io/serial_cboard.hpp"
@@ -185,30 +186,51 @@ bool GreenLightDetector::loadConfig(const std::string& config_path) {
         // 默认显示PNP结果
         config.show_pnp_results = true;
         
-        // 电机配置
-        if (auto motor_cfg = tools::read_optional<std::map<std::string, float>>(config_yaml, "motor_config")) {
-            if (motor_cfg->count("distance_per_rotation_mm")) {
-                config.motor_distance_per_rotation_mm = motor_cfg->at("distance_per_rotation_mm");
-            } else {
-                config.motor_distance_per_rotation_mm = 10.0f;  // 默认值
+        // 电机配置 - 设置默认值
+        config.motor_distance_per_rotation_mm = 10.0f;
+        config.motor_max_rotations = 5.0f;
+        config.motor_min_rotations = -5.0f;
+        config.force_motor_rotations = false;
+        config.default_motor_rotations = 0.0f;
+        
+        // 从 YAML 读取电机配置（支持 bool 和 float 混合）
+        if (config_yaml["motor_config"]) {
+            auto motor_node = config_yaml["motor_config"];
+            
+            if (motor_node["distance_per_rotation_mm"]) {
+                config.motor_distance_per_rotation_mm = motor_node["distance_per_rotation_mm"].as<float>();
             }
             
-            if (motor_cfg->count("max_rotations")) {
-                config.motor_max_rotations = motor_cfg->at("max_rotations");
-            } else {
-                config.motor_max_rotations = 5.0f;
+            if (motor_node["max_rotations"]) {
+                config.motor_max_rotations = motor_node["max_rotations"].as<float>();
             }
             
-            if (motor_cfg->count("min_rotations")) {
-                config.motor_min_rotations = motor_cfg->at("min_rotations");
-            } else {
-                config.motor_min_rotations = -5.0f;
+            if (motor_node["min_rotations"]) {
+                config.motor_min_rotations = motor_node["min_rotations"].as<float>();
             }
-        } else {
-            // 默认值
-            config.motor_distance_per_rotation_mm = 10.0f;
-            config.motor_max_rotations = 5.0f;
-            config.motor_min_rotations = -5.0f;
+            
+            // 读取 bool 类型的 force_motor_rotations
+            if (motor_node["force_motor_rotations"]) {
+                config.force_motor_rotations = motor_node["force_motor_rotations"].as<bool>();
+            }
+            
+            // 读取 float 类型的 default_motor_rotations
+            if (motor_node["default_motor_rotations"]) {
+                config.default_motor_rotations = motor_node["default_motor_rotations"].as<float>();
+            }
+        }
+
+        // 飞镖检测策略
+        if (config_yaml["dart_strategy"]) {
+            std::string strat = config_yaml["dart_strategy"].as<std::string>();
+            if (strat == "fixed") config.dart_strategy = Config::DartStrategy::Fixed;
+            else if (strat == "random_fixed") config.dart_strategy = Config::DartStrategy::RandomFixed;
+        }
+        if (config_yaml["random_move_range_degrees"]) {
+            config.random_move_range_degrees = config_yaml["random_move_range_degrees"].as<float>();
+        }
+        if (config_yaml["random_move_after_hit"]) {
+            config.random_move_after_hit = config_yaml["random_move_after_hit"].as<bool>();
         }
         
         cout << "Motor config loaded: distance_per_rotation=" << config.motor_distance_per_rotation_mm 
@@ -247,6 +269,12 @@ bool GreenLightDetector::initialize(const std::string& config_path) {
         cerr << "Continuing without serial communication..." << endl;
         serial_board_ = nullptr;
     }
+
+    // dart 模块初始状态
+    initial_motor_rotations = 0.0;
+    current_motor_rotations = initial_motor_rotations;
+    detection_window_active = false;
+    rng.seed(std::random_device{}());
     
     return true;
 }
@@ -671,7 +699,14 @@ void GreenLightDetector::sendDataToSerial(const DetectedTarget& target) {
     // 计算电机转圈数：根据云台方位角(yaw)与发射装置的水平距离
     // yaw 为目标相对于云台的方位角（度数），转换为对应的电机转圈数
     // 公式：电机转圈数 = yaw角度(度) / 360 * (motor_distance_per_rotation_mm / distance_per_rotation_mm)
-    if (config.motor_distance_per_rotation_mm > 0) {
+    // 如果配置中启用了强制发送圈数，或处于固定策略
+    if (config.force_motor_rotations || config.dart_strategy == Config::DartStrategy::Fixed) {
+        cmd.motor_rotations = config.default_motor_rotations;
+        tools::logger()->info("[Motor] force default motor_rotations={:.3f}", cmd.motor_rotations);
+    } else if (config.dart_strategy == Config::DartStrategy::RandomFixed && detection_window_active) {
+        // 在随机固定策略的窗口期间，保持当前位置
+        cmd.motor_rotations = current_motor_rotations;
+    } else if (config.motor_distance_per_rotation_mm > 0) {
         // 简化公式：目标方位角 / 360 表示相对于一整圈的比例
         // 电机转圈数 = 目标方位角比例 * 电机转圈数变化范围
         float motor_rotations = (target.yaw_gimbal_deg / 360.0f) * config.motor_distance_per_rotation_mm;
@@ -694,6 +729,39 @@ void GreenLightDetector::sendDataToSerial(const DetectedTarget& target) {
     cout << "Sent to serial: yaw=" << cmd.yaw << "°, pitch=" << cmd.pitch 
          << "°, distance=" << cmd.horizon_distance << "m"
          << ", motor_rotations=" << cmd.motor_rotations << endl;
+}
+
+// 以下是 dart 事件的简单实现
+void GreenLightDetector::onGateOpening() {
+    if (config.dart_strategy != Config::DartStrategy::RandomFixed) return;
+    detection_window_active = true;
+    // 生成一个随机偏移
+    double max_offset = (config.random_move_range_degrees / 360.0) * config.motor_distance_per_rotation_mm;
+    std::uniform_real_distribution<double> dist(-max_offset, max_offset);
+    current_motor_rotations = initial_motor_rotations + dist(rng);
+    tools::logger()->info("[Dart] gate opening: move to {:.3f} rotations", current_motor_rotations);
+}
+
+void GreenLightDetector::onGateFullyOpened() {
+    // 保留当前随机位置，不作额外处理
+    if (config.dart_strategy != Config::DartStrategy::RandomFixed) return;
+}
+
+void GreenLightDetector::onDetectionWindowEnd() {
+    if (config.dart_strategy != Config::DartStrategy::RandomFixed) return;
+    detection_window_active = false;
+    current_motor_rotations = initial_motor_rotations;
+    tools::logger()->info("[Dart] window end, restore initial position");
+}
+
+void GreenLightDetector::onDartHit() {
+    if (config.dart_strategy != Config::DartStrategy::RandomFixed) return;
+    if (config.random_move_after_hit) {
+        double max_offset = (config.random_move_range_degrees / 360.0) * config.motor_distance_per_rotation_mm;
+        std::uniform_real_distribution<double> dist(-max_offset, max_offset);
+        current_motor_rotations = initial_motor_rotations + dist(rng);
+        tools::logger()->info("[Dart] hit -> new random position {:.3f}", current_motor_rotations);
+    }
 }
 
 
@@ -848,6 +916,18 @@ void GreenLightDetector::run() {
         } else if (key == 'p') {
             config.show_pnp_results = !config.show_pnp_results;
             cout << "PNP results display: " << (config.show_pnp_results ? "ON" : "OFF") << endl;
+        } else if (key == 'g') {
+            // 模拟闸门开始打开
+            cout << "[TEST] gate opening event" << endl;
+            onGateOpening();
+        } else if (key == 'e') {
+            // 模拟检测窗口结束
+            cout << "[TEST] window end event" << endl;
+            onDetectionWindowEnd();
+        } else if (key == 'h') {
+            // 模拟飞镖命中
+            cout << "[TEST] dart hit event" << endl;
+            onDartHit();
         }
     }
 }

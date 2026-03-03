@@ -49,7 +49,8 @@ private:
 
   // 串口通信协议参数
   uint8_t tx_header_;      // 发送帧头
-  uint8_t tx_footer_;      // 发送帧尾
+  uint8_t tx_cmd_id_;      // 发送指令ID
+  uint8_t tx_data_length_; // 发送数据长度
   uint8_t rx_header_;      // 接收帧头
   uint8_t rx_footer_;      // 接收帧尾
   size_t tx_frame_length_;  // 发送帧长度

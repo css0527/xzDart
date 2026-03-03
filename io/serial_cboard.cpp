@@ -219,24 +219,30 @@ void SerialBoard::send(Command command) const
     return;
   }
 
-  // 简化帧结构：只发送电机转圈数
-  // 帧结构：[帧头(1字节)] [电机转圈数(4字节)] [帧尾(1字节)]
-  uint8_t frame[6] = {0};
+    // 新协议帧结构：[包头(1)] [指令ID(1)] [数据长度(1)] [数据(4)] [校验和(1)]
+    uint8_t frame[8] = {0};
 
-  // 帧头
+    // 字节0：包头
   frame[0] = tx_header_;
 
-  // 电机转圈数（float，小端）- bytes 1-4
-  float motor_rotations = static_cast<float>(command.motor_rotations);
-  memcpy(&frame[1], &motor_rotations, sizeof(float));
+    // 字节1：指令ID（设置圈数）
+    frame[1] = tx_cmd_id_;
 
-  // 帧尾 - byte 5
-  frame[5] = tx_footer_;
+    // 字节2：数据长度（float占4字节）
+    frame[2] = tx_data_length_;
+
+    // 字节3-6：电机转圈数（float，小端序）
+  float motor_rotations = static_cast<float>(command.motor_rotations);
+    memcpy(&frame[3], &motor_rotations, sizeof(float));
+
+    // 字节7：校验和 = (ID + LEN + D0 + D1 + D2 + D3) & 0xFF
+    uint16_t checksum = frame[1] + frame[2] + frame[3] + frame[4] + frame[5] + frame[6];
+    frame[7] = checksum & 0xFF;
 
   // 发送数据
-  ssize_t written = write(fd_, frame, 6);
+    ssize_t written = write(fd_, frame, 8);
   
-  if (written != 6) {
+    if (written != 8) {
     perror("[SerialBoard] 串口发送失败");
   } else {
     tools::logger()->info(
@@ -245,8 +251,8 @@ void SerialBoard::send(Command command) const
   }
 
   // 调试打印
-  std::cout << "[Serial] Send frame (6 bytes): ";
-  for (int i = 0; i < 6; i++) {
+    std::cout << "[Serial] Send frame (8 bytes): ";
+    for (int i = 0; i < 8; i++) {
     printf("%02X ", frame[i]);
   }
   std::cout << std::endl;
@@ -270,28 +276,30 @@ std::string SerialBoard::read_yaml(const std::string & config_path)
 
   // 读取串口协议参数
   if (auto serial_protocol = yaml["serial_protocol"]) {
-    // 读取发送帧头/尾
+    // 读取发送协议参数
     tx_header_ = serial_protocol["tx_header"].as<uint8_t>(0xED);
-    tx_footer_ = serial_protocol["tx_footer"].as<uint8_t>(0xEC);
+    tx_cmd_id_ = serial_protocol["tx_cmd_id"].as<uint8_t>(0x01);
+    tx_data_length_ = serial_protocol["tx_data_length"].as<uint8_t>(0x04);
     
     // 读取接收帧头/尾
     rx_header_ = serial_protocol["rx_header"].as<uint8_t>(0x78);
     rx_footer_ = serial_protocol["rx_footer"].as<uint8_t>(0x76);
     
     // 读取帧长度
-    tx_frame_length_ = serial_protocol["tx_frame_length"].as<size_t>(16);
+    tx_frame_length_ = serial_protocol["tx_frame_length"].as<size_t>(8);
     rx_frame_length_ = serial_protocol["rx_frame_length"].as<size_t>(14);
     
-    tools::logger()->info("[SerialBoard] 协议配置: TX[0x{:02X}...0x{:02X}]({} bytes), RX[0x{:02X}...0x{:02X}]({} bytes)",
-                         (int)tx_header_, (int)tx_footer_, tx_frame_length_,
+    tools::logger()->info("[SerialBoard] 协议配置: TX[0x{:02X}]({} bytes), RX[0x{:02X}...0x{:02X}]({} bytes)",
+                         (int)tx_header_, (int)tx_frame_length_,
                          (int)rx_header_, (int)rx_footer_, rx_frame_length_);
   } else {
     // 使用默认值
     tx_header_ = 0xED;
-    tx_footer_ = 0xEC;
+    tx_cmd_id_ = 0x01;
+    tx_data_length_ = 0x04;
     rx_header_ = 0x78;
     rx_footer_ = 0x76;
-    tx_frame_length_ = 16;
+    tx_frame_length_ = 8;
     rx_frame_length_ = 14;
     
     tools::logger()->warn("[SerialBoard] 使用默认协议配置");
