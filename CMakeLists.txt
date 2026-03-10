@@ -48,12 +48,14 @@ link_directories(io/hikrobot/lib/amd64)
 add_executable(main
     main.cpp
     detector/GreenLightDetector.cpp
+    io/gimbal/gimbal.cpp
     io/camera.cpp
     io/hikrobot/hikrobot.cpp
     io/serial_cboard.cpp
     tools/logger.cpp
     tools/img_tools.cpp
     tools/math_tools.cpp
+    tools/crc.cpp
 )
 
 add_executable(camera_calibration
@@ -86,7 +88,10 @@ target_link_libraries(main
     usb-1.0
     MvCameraControl
     Threads::Threads
+    serial
 )
+
+add_subdirectory(io/serial)
 
 target_link_libraries(camera_calibration
     ${OpenCV_LIBS}

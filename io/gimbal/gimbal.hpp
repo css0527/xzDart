@@ -27,7 +27,6 @@ struct __attribute__((packed)) GimbalToVision
   uint16_t bullet_count;  // 子弹累计发送次数
   uint16_t crc16;
 };
-};
 
 static_assert(sizeof(GimbalToVision) <= 64);
 
